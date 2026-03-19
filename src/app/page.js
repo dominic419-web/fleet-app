@@ -2926,34 +2926,29 @@ const handleKmUpdate = async () => {
       }
     }
 
-    const nextDoc = {
-      ...currentDoc,
-      uploaded: false,
-      fileName: "",
-      fileType: "",
-      fileSize: 0,
-      filePath: "",
-      fileUrl: "",
-      fileDataUrl: "",
-      uploadedAt: "",
-    };
+    const { error: deleteRowError } = await supabase
+      .from("vehicle_documents")
+      .delete()
+      .eq("vehicle_id", vehicleId)
+      .eq("doc_key", docKey);
 
-    const { error } = await upsertVehicleDocumentRow({
-      vehicleId,
-      docKey,
-      doc: nextDoc,
-    });
-
-    if (error) {
-      showToast(`Törlési hiba: ${error.message}`, "error");
+    if (deleteRowError) {
+      showToast(`Törlési hiba: ${deleteRowError.message}`, "error");
       return;
     }
+
+    const fallbackDocs = createDefaultVehicleDocs();
+    const fallbackDoc = fallbackDocs[docKey];
 
     setDocumentsByVehicle((prev) => ({
       ...prev,
       [idKey]: {
         ...(prev[idKey] || createDefaultVehicleDocs()),
-        [docKey]: nextDoc,
+        [docKey]: {
+          ...fallbackDoc,
+          expiry: currentDoc?.expiry || fallbackDoc?.expiry || "",
+          note: currentDoc?.note || "",
+        },
       },
     }));
 
