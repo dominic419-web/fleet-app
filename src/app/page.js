@@ -207,23 +207,13 @@ const createKmUpdateEntry = ({
 
 const parseLastServiceKmFromEntry = (entry) => {
   const sources = [entry?.detail, entry?.title, entry?.note].filter(Boolean);
-
   for (const source of sources) {
-    const value = String(source);
-
-    const explicitMatch = value.match(/Utolsó\s+szerviz:\s*([\d\s.,]+)/i);
-    if (explicitMatch?.[1]) {
-      const normalized = explicitMatch[1].replace(/[^\d]/g, "");
-      if (normalized) return Number(normalized);
-    }
-
-    const reverseMatch = value.match(/([\d\s.,]+)\s*km\s+utolsó\s+szerviz/i);
-    if (reverseMatch?.[1]) {
-      const normalized = reverseMatch[1].replace(/[^\d]/g, "");
+    const match = String(source).match(/Utolsó szerviz:\s*([\d\s.,]+)/i);
+    if (match?.[1]) {
+      const normalized = match[1].replace(/[^\d]/g, "");
       if (normalized) return Number(normalized);
     }
   }
-
   return null;
 };
 
@@ -360,26 +350,21 @@ const attachHistoryToVehicles = (vehiclesList = [], serviceRows = [], kmRows = [
   });
 };
 
-const fetchVehicleHistoryRows = async (vehicleId, userId = null) => {
-  let serviceQuery = supabase
-    .from("service_history")
-    .select("*")
-    .eq("vehicle_id", vehicleId);
-
-  let kmQuery = supabase
-    .from("km_logs")
-    .select("*")
-    .eq("vehicle_id", vehicleId);
-
-  if (userId) {
-    serviceQuery = serviceQuery.eq("user_id", userId);
-    kmQuery = kmQuery.eq("user_id", userId);
-  }
-
+const fetchVehicleHistoryRows = async (vehicleId) => {
   const [{ data: serviceRows, error: serviceError }, { data: kmRows, error: kmError }] =
     await Promise.all([
-      serviceQuery.order("entry_date", { ascending: false }).order("created_at", { ascending: false }),
-      kmQuery.order("entry_date", { ascending: false }).order("created_at", { ascending: false }),
+      supabase
+        .from("service_history")
+        .select("*")
+        .eq("vehicle_id", vehicleId)
+        .order("entry_date", { ascending: false })
+        .order("created_at", { ascending: false }),
+      supabase
+        .from("km_logs")
+        .select("*")
+        .eq("vehicle_id", vehicleId)
+        .order("entry_date", { ascending: false })
+        .order("created_at", { ascending: false }),
     ]);
 
   return {
@@ -612,7 +597,6 @@ export default function Home() {
   const [authReady, setAuthReady] = useState(false);
   const [session, setSession] = useState(null);
   const [authEmail, setAuthEmail] = useState("");
-  const [authPassword, setAuthPassword] = useState("");
   const [authSubmitting, setAuthSubmitting] = useState(false);
 
   const [vehicles, setVehicles] = useState(initialVehicles);
@@ -687,6 +671,8 @@ export default function Home() {
     inspectionExpiry: "",
     oilChangeIntervalKm: "",
     timingBeltIntervalKm: "",
+    currentKm: "",
+    lastServiceKm: "",
   });
 
   const [serviceDraft, setServiceDraft] = useState({
@@ -710,9 +696,6 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
   km: "",
   note: "",
 });
-
-  const currentUser = session?.user ?? null;
-  const scopedStorageKey = (key) => (currentUser?.id ? `${key}-${currentUser.id}` : key);
 
   const ensureVehicleHistory = (vehicle) => {
     const existingHistory = Array.isArray(vehicle?.serviceHistory)
@@ -768,20 +751,21 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
     };
   }, []);
 
-  const handlePasswordLogin = async () => {
+  const handleMagicLinkLogin = async () => {
     const email = authEmail.trim();
-    const password = authPassword;
-
-    if (!email || !password) {
-      showToast("Add meg az email címet és a jelszót", "error");
+    if (!email) {
+      showToast("Adj meg egy email címet", "error");
       return;
     }
 
     setAuthSubmitting(true);
 
-    const { error } = await supabase.auth.signInWithPassword({
+    const { error } = await supabase.auth.signInWithOtp({
       email,
-      password,
+      options: {
+        emailRedirectTo:
+          typeof window !== "undefined" ? window.location.origin : undefined,
+      },
     });
 
     setAuthSubmitting(false);
@@ -791,8 +775,7 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
       return;
     }
 
-    setAuthPassword("");
-    showToast("Sikeres bejelentkezés", "success");
+    showToast("Magic link elküldve az emailedre", "success");
   };
 
   const handleSignOut = async () => {
@@ -806,19 +789,16 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
   };
 
   useEffect(() => {
-    if (!authReady || !currentUser?.id) return;
+    if (!authReady || !session) return;
 
     const initializeApp = async () => {
-      const fallbackVehicles = safeRead(
-        scopedStorageKey(STORAGE_KEYS.vehicles),
-        initialVehicles
-      ).map(ensureVehicleHistory);
+      const fallbackVehicles = safeRead(STORAGE_KEYS.vehicles, []).map(ensureVehicleHistory);
 
-      const savedOwners = safeRead(scopedStorageKey(STORAGE_KEYS.owners), initialOwnerOptions);
-      const savedEmail = safeRead(scopedStorageKey(STORAGE_KEYS.email), defaultEmailSettings);
-      const savedAck = safeRead(scopedStorageKey(STORAGE_KEYS.ack), {});
-      const savedDismissed = safeRead(scopedStorageKey(STORAGE_KEYS.dismissed), {});
-      const savedUi = safeRead(scopedStorageKey(STORAGE_KEYS.ui), {
+      const savedOwners = safeRead(STORAGE_KEYS.owners, initialOwnerOptions);
+      const savedEmail = safeRead(STORAGE_KEYS.email, defaultEmailSettings);
+      const savedAck = safeRead(STORAGE_KEYS.ack, {});
+      const savedDismissed = safeRead(STORAGE_KEYS.dismissed, {});
+      const savedUi = safeRead(STORAGE_KEYS.ui, {
         selectedId: fallbackVehicles[0]?.id ?? null,
         activePage: "szerviz",
         query: "",
@@ -836,16 +816,9 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
       let loadedVehicles = fallbackVehicles;
 
       try {
-        await Promise.all([
-          supabase.from("vehicles").update({ user_id: currentUser.id }).is("user_id", null),
-          supabase.from("service_history").update({ user_id: currentUser.id }).is("user_id", null),
-          supabase.from("km_logs").update({ user_id: currentUser.id }).is("user_id", null),
-        ]);
-
         const { data, error } = await supabase
           .from("vehicles")
           .select("*")
-          .eq("user_id", currentUser.id)
           .order("id", { ascending: false });
 
         if (error) {
@@ -855,13 +828,11 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
             supabase
               .from("service_history")
               .select("*")
-              .eq("user_id", currentUser.id)
               .order("entry_date", { ascending: false })
               .order("created_at", { ascending: false }),
             supabase
               .from("km_logs")
               .select("*")
-              .eq("user_id", currentUser.id)
               .order("entry_date", { ascending: false })
               .order("created_at", { ascending: false }),
           ]);
@@ -886,10 +857,7 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
         console.error("Vehicle initialization error:", err);
       }
 
-      const savedDocs = safeRead(
-        scopedStorageKey(STORAGE_KEYS.docs),
-        createInitialDocsMap(loadedVehicles)
-      );
+      const savedDocs = safeRead(STORAGE_KEYS.docs, createInitialDocsMap(loadedVehicles || []));
 
       setVehicles(loadedVehicles);
       setOwnerOptions(savedOwners);
@@ -921,42 +889,42 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
     };
 
     initializeApp();
-  }, [authReady, currentUser?.id]);
+  }, [authReady, session]);
 
   useEffect(() => {
     if (!hydrated) return;
-    safeWrite(scopedStorageKey(STORAGE_KEYS.vehicles), vehicles);
+    safeWrite(STORAGE_KEYS.vehicles, vehicles);
   }, [vehicles, hydrated]);
 
   useEffect(() => {
     if (!hydrated) return;
-    safeWrite(scopedStorageKey(STORAGE_KEYS.owners), ownerOptions);
+    safeWrite(STORAGE_KEYS.owners, ownerOptions);
   }, [ownerOptions, hydrated]);
 
   useEffect(() => {
     if (!hydrated) return;
-    safeWrite(scopedStorageKey(STORAGE_KEYS.docs), documentsByVehicle);
+    safeWrite(STORAGE_KEYS.docs, documentsByVehicle);
   }, [documentsByVehicle, hydrated]);
 
   useEffect(() => {
     if (!hydrated) return;
-    safeWrite(scopedStorageKey(STORAGE_KEYS.email), emailSettings);
+    safeWrite(STORAGE_KEYS.email, emailSettings);
   }, [emailSettings, hydrated]);
 
   useEffect(() => {
     if (!hydrated) return;
-    safeWrite(scopedStorageKey(STORAGE_KEYS.ack), acknowledgedNotifications);
+    safeWrite(STORAGE_KEYS.ack, acknowledgedNotifications);
   }, [acknowledgedNotifications, hydrated]);
 
   useEffect(() => {
     if (!hydrated) return;
-    safeWrite(scopedStorageKey(STORAGE_KEYS.dismissed), dismissedNotifications);
+    safeWrite(STORAGE_KEYS.dismissed, dismissedNotifications);
   }, [dismissedNotifications, hydrated]);
 
   useEffect(() => {
     if (!hydrated) return;
 
-    safeWrite(scopedStorageKey(STORAGE_KEYS.ui), {
+    safeWrite(STORAGE_KEYS.ui, {
       selectedId,
       activePage,
       query,
@@ -1547,6 +1515,14 @@ const serviceDashboardYearlyCosts = useMemo(() => {
         selectedVehicle.timingBeltIntervalKm !== undefined && selectedVehicle.timingBeltIntervalKm !== null
           ? String(selectedVehicle.timingBeltIntervalKm)
           : "",
+      currentKm:
+        selectedVehicle.currentKm !== undefined && selectedVehicle.currentKm !== null
+          ? String(selectedVehicle.currentKm)
+          : "",
+      lastServiceKm:
+        selectedVehicle.lastServiceKm !== undefined && selectedVehicle.lastServiceKm !== null
+          ? String(selectedVehicle.lastServiceKm)
+          : "",
     });
 
     setServiceDraft({
@@ -2131,7 +2107,6 @@ const buildHealthCsvExport = () => {
   };
 
   const saveVehicleDetails = async () => {
-    if (!currentUser?.id) return;
     const resolvedOwner = resolveOwnerValue(
       vehicleDetailsForm.ownerMode,
       vehicleDetailsForm.customOwner
@@ -2163,13 +2138,20 @@ const buildHealthCsvExport = () => {
         vehicleDetailsForm.timingBeltIntervalKm === ""
           ? null
           : Number(vehicleDetailsForm.timingBeltIntervalKm),
+      currentKm:
+        vehicleDetailsForm.currentKm === ""
+          ? 0
+          : Number(vehicleDetailsForm.currentKm),
+      lastServiceKm:
+        vehicleDetailsForm.lastServiceKm === ""
+          ? 0
+          : Number(vehicleDetailsForm.lastServiceKm),
     };
 
     const { data, error } = await supabase
       .from("vehicles")
       .update(vehiclePayload)
       .eq("id", selectedId)
-      .eq("user_id", currentUser.id)
       .select();
 
     console.log("SUPABASE UPDATE DATA:", data);
@@ -2236,6 +2218,14 @@ const buildHealthCsvExport = () => {
       timingBeltIntervalKm:
         selectedVehicle.timingBeltIntervalKm !== undefined && selectedVehicle.timingBeltIntervalKm !== null
           ? String(selectedVehicle.timingBeltIntervalKm)
+          : "",
+      currentKm:
+        selectedVehicle.currentKm !== undefined && selectedVehicle.currentKm !== null
+          ? String(selectedVehicle.currentKm)
+          : "",
+      lastServiceKm:
+        selectedVehicle.lastServiceKm !== undefined && selectedVehicle.lastServiceKm !== null
+          ? String(selectedVehicle.lastServiceKm)
           : "",
     });
 
@@ -2338,7 +2328,6 @@ const buildHealthCsvExport = () => {
   };
 
   const addServiceHistoryEntry = async () => {
-    if (!currentUser?.id) return;
     if (!selectedVehicle) return;
 
     const kmValue =
@@ -2381,7 +2370,6 @@ const buildHealthCsvExport = () => {
       .insert([
         {
           vehicle_id: selectedId,
-          user_id: currentUser.id,
           entry_date: serviceHistoryDraft.date,
           km: kmValue,
           service_type: resolvedServiceType,
@@ -2414,7 +2402,6 @@ const buildHealthCsvExport = () => {
         lastServiceKm: kmValue,
       })
       .eq("id", selectedId)
-      .eq("user_id", currentUser.id)
       .select();
 
     if (updateError) {
@@ -2462,7 +2449,6 @@ const buildHealthCsvExport = () => {
 
 
 const handleKmUpdate = async () => {
-  if (!currentUser?.id) return;
   if (!selectedVehicle) return;
 
   const kmValue = Number(kmUpdateDraft.km);
@@ -2486,7 +2472,6 @@ const handleKmUpdate = async () => {
     .insert([
       {
         vehicle_id: selectedId,
-        user_id: currentUser.id,
         entry_date: kmUpdateDraft.date,
         km: kmValue,
         note: kmUpdateDraft.note.trim(),
@@ -2513,7 +2498,6 @@ const handleKmUpdate = async () => {
       currentKm: kmValue,
     })
     .eq("id", selectedId)
-    .eq("user_id", currentUser.id)
     .select();
 
   if (updateError) {
@@ -2556,7 +2540,6 @@ const handleKmUpdate = async () => {
 };
 
   const removeServiceHistoryEntry = async (entryId) => {
-    if (!currentUser?.id) return;
     if (!selectedVehicle) return;
 
     const targetEntry = (Array.isArray(selectedVehicle.serviceHistory) ? selectedVehicle.serviceHistory : [])
@@ -2572,8 +2555,7 @@ const handleKmUpdate = async () => {
         .from("service_history")
         .delete()
         .eq("id", entryId)
-        .eq("vehicle_id", selectedId)
-        .eq("user_id", currentUser.id);
+        .eq("vehicle_id", selectedId);
 
       deleteError = error;
     } else if (targetEntry.type === "km-update") {
@@ -2581,8 +2563,7 @@ const handleKmUpdate = async () => {
         .from("km_logs")
         .delete()
         .eq("id", entryId)
-        .eq("vehicle_id", selectedId)
-        .eq("user_id", currentUser.id);
+        .eq("vehicle_id", selectedId);
 
       deleteError = error;
     }
@@ -2594,7 +2575,7 @@ const handleKmUpdate = async () => {
       return;
     }
 
-    const { serviceRows, kmRows, error: historyLoadError } = await fetchVehicleHistoryRows(selectedId, currentUser.id);
+    const { serviceRows, kmRows, error: historyLoadError } = await fetchVehicleHistoryRows(selectedId);
 
     if (historyLoadError) {
       showToast(`Törlés utáni betöltési hiba: ${historyLoadError.message}`, "error");
@@ -2626,7 +2607,6 @@ const handleKmUpdate = async () => {
         lastServiceKm: recalculatedState.lastServiceKm,
       })
       .eq("id", selectedId)
-      .eq("user_id", currentUser.id)
       .select();
 
     if (vehicleUpdateError) {
@@ -2701,7 +2681,6 @@ const handleKmUpdate = async () => {
   };
 
   const addVehicle = async () => {
-    if (!currentUser?.id) return;
     const resolvedOwner = resolveOwnerValue(form.ownerMode, form.customOwner);
 
     if (!form.name || !form.plate || !form.currentKm || !form.lastServiceKm) {
@@ -2729,7 +2708,6 @@ const handleKmUpdate = async () => {
       timingBeltIntervalKm:
         form.timingBeltIntervalKm === "" ? null : Number(form.timingBeltIntervalKm),
       archived: false,
-      user_id: currentUser.id,
     };
 
     const { data, error } = await supabase
@@ -2786,20 +2764,8 @@ const handleKmUpdate = async () => {
     showSaved("Új autó felvéve");
   };
 
-  const archiveSelectedVehicle = async () => {
-    if (!currentUser?.id) return;
+  const archiveSelectedVehicle = () => {
     if (!vehicleToArchive) return;
-
-    const { error } = await supabase
-      .from("vehicles")
-      .update({ archived: true })
-      .eq("id", vehicleToArchive.id)
-      .eq("user_id", currentUser.id);
-
-    if (error) {
-      showToast(`Archiválási hiba: ${error.message}`, "error");
-      return;
-    }
 
     setVehicles((prev) =>
       prev.map((vehicle) =>
@@ -2816,20 +2782,7 @@ const handleKmUpdate = async () => {
     showSaved("Jármű archiválva");
   };
 
-  const restoreVehicle = async (vehicleId) => {
-    if (!currentUser?.id) return;
-
-    const { error } = await supabase
-      .from("vehicles")
-      .update({ archived: false })
-      .eq("id", vehicleId)
-      .eq("user_id", currentUser.id);
-
-    if (error) {
-      showToast(`Visszaállítási hiba: ${error.message}`, "error");
-      return;
-    }
-
+  const restoreVehicle = (vehicleId) => {
     setVehicles((prev) =>
       prev.map((vehicle) =>
         vehicle.id === vehicleId
@@ -2846,7 +2799,6 @@ const handleKmUpdate = async () => {
   };
 
   const deleteVehiclePermanently = async () => {
-    if (!currentUser?.id) return;
     if (!vehicleToDelete) return;
 
     const vehicleId = vehicleToDelete.id;
@@ -2854,8 +2806,7 @@ const handleKmUpdate = async () => {
     const { error } = await supabase
       .from("vehicles")
       .delete()
-      .eq("id", vehicleId)
-      .eq("user_id", currentUser.id);
+      .eq("id", vehicleId);
 
     console.log("SUPABASE DELETE ERROR:", error);
 
@@ -2951,7 +2902,7 @@ const handleKmUpdate = async () => {
             <div className="mb-3 text-sm uppercase tracking-[0.22em] text-cyan-200/80">Fleet login</div>
             <h1 className="text-3xl font-bold text-white">Bejelentkezés</h1>
             <p className="mt-3 text-sm text-slate-400">
-              Email és jelszó megadásával tudsz belépni a flottakezelőbe.
+              Emailes magic linkkel tudsz belépni a flottakezelőbe.
             </p>
             <div className="mt-6 space-y-3">
               <Label>Email cím</Label>
@@ -2962,16 +2913,8 @@ const handleKmUpdate = async () => {
                 placeholder="pelda@email.hu"
                 className="fleet-input rounded-2xl"
               />
-              <Label>Jelszó</Label>
-              <Input
-                type="password"
-                value={authPassword}
-                onChange={(e) => setAuthPassword(e.target.value)}
-                placeholder="Jelszó"
-                className="fleet-input rounded-2xl"
-              />
-              <Button className="w-full rounded-2xl" onClick={handlePasswordLogin} disabled={authSubmitting}>
-                {authSubmitting ? "Belépés..." : "Belépés"}
+              <Button className="w-full rounded-2xl" onClick={handleMagicLinkLogin} disabled={authSubmitting}>
+                {authSubmitting ? "Küldés..." : "Magic link küldése"}
               </Button>
             </div>
           </div>
@@ -2988,7 +2931,7 @@ const handleKmUpdate = async () => {
             <div className="mb-3 text-sm uppercase tracking-[0.22em] text-cyan-200/80">Fleet login</div>
             <h1 className="text-3xl font-bold text-white">Bejelentkezés</h1>
             <p className="mt-3 text-sm text-slate-400">
-              Add meg az email címedet és a jelszavadat a belépéshez.
+              Add meg az email címed, és küldünk egy belépési linket.
             </p>
             <div className="mt-6 space-y-3">
               <Label>Email cím</Label>
@@ -2999,16 +2942,8 @@ const handleKmUpdate = async () => {
                 placeholder="pelda@email.hu"
                 className="fleet-input rounded-2xl"
               />
-              <Label>Jelszó</Label>
-              <Input
-                type="password"
-                value={authPassword}
-                onChange={(e) => setAuthPassword(e.target.value)}
-                placeholder="Jelszó"
-                className="fleet-input rounded-2xl"
-              />
-              <Button className="w-full rounded-2xl" onClick={handlePasswordLogin} disabled={authSubmitting}>
-                {authSubmitting ? "Belépés..." : "Belépés"}
+              <Button className="w-full rounded-2xl" onClick={handleMagicLinkLogin} disabled={authSubmitting}>
+                {authSubmitting ? "Küldés..." : "Magic link küldése"}
               </Button>
             </div>
           </div>
@@ -4166,6 +4101,40 @@ const handleKmUpdate = async () => {
                             })
                           }
                           placeholder="pl. 180000"
+                          className={lockedInputClass}
+                        />
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label>Jelenlegi km</Label>
+                        <Input
+                          type="number"
+                          value={vehicleDetailsForm.currentKm}
+                          disabled={!isVehicleDetailsEditing}
+                          onChange={(e) =>
+                            setVehicleDetailsForm({
+                              ...vehicleDetailsForm,
+                              currentKm: e.target.value,
+                            })
+                          }
+                          placeholder="pl. 125000"
+                          className={lockedInputClass}
+                        />
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label>Utolsó szerviz km</Label>
+                        <Input
+                          type="number"
+                          value={vehicleDetailsForm.lastServiceKm}
+                          disabled={!isVehicleDetailsEditing}
+                          onChange={(e) =>
+                            setVehicleDetailsForm({
+                              ...vehicleDetailsForm,
+                              lastServiceKm: e.target.value,
+                            })
+                          }
+                          placeholder="pl. 110000"
                           className={lockedInputClass}
                         />
                       </div>
