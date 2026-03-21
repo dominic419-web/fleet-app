@@ -321,6 +321,55 @@ const buildFleetHealthScore = (vehicles, notifications) => {
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 
+const serializeSupabaseError = (error) => {
+  if (!error) return "Ismeretlen hiba";
+  if (typeof error === "string") return error;
+
+  const parts = [error.message, error.details, error.hint, error.code]
+    .filter(Boolean)
+    .map((value) => String(value).trim())
+    .filter(Boolean);
+
+  if (parts.length > 0) {
+    return parts.join(" | ");
+  }
+
+  try {
+    return JSON.stringify(error, Object.getOwnPropertyNames(error));
+  } catch {
+    return "Nem sikerült kiolvasni a hiba részleteit";
+  }
+};
+
+const buildVehicleDbPayload = (formState, resolvedOwner, userId) => ({
+  user_id: userId,
+  name: formState.name.trim(),
+  plate: formState.plate.toUpperCase().trim(),
+  currentKm: Number(formState.currentKm),
+  lastServiceKm: Number(formState.lastServiceKm),
+  owner: resolvedOwner || "",
+  note: formState.note || "",
+  year: formState.year || null,
+  vin: (formState.vin || "").toUpperCase(),
+  fuelType: formState.fuelType || "Benzin",
+  insuranceExpiry: formState.insuranceExpiry || null,
+  inspectionExpiry: formState.inspectionExpiry || null,
+  oilChangeIntervalKm:
+    formState.oilChangeIntervalKm === "" ? null : Number(formState.oilChangeIntervalKm),
+  timingBeltIntervalKm:
+    formState.timingBeltIntervalKm === "" ? null : Number(formState.timingBeltIntervalKm),
+  archived: false,
+  status: "active",
+});
+
+const buildVehicleDbPayloadFallback = (formState, userId) => ({
+  user_id: userId,
+  name: formState.name.trim(),
+  plate: formState.plate.toUpperCase().trim(),
+  currentKm: Number(formState.currentKm),
+  lastServiceKm: Number(formState.lastServiceKm),
+});
+
 const buildFleetHealthTrend = (score, vehicles, notifications) => {
   const monthLabels = ["Jan", "Feb", "Már", "Ápr", "Máj", "Jún", "Júl", "Aug", "Szept", "Okt", "Nov", "Dec"];
   const now = new Date();
@@ -381,23 +430,27 @@ const mapSupabaseVehicleRow = (row) =>
       row.plate ||
       `Jármű ${row.id}`,
     plate: row.plate || "",
-    currentKm: Number(row.current_km ?? row.mileage ?? 0),
-    lastServiceKm: Number(row.last_service_km ?? row.mileage ?? 0),
+    currentKm: Number(row.currentKm ?? row.current_km ?? row.mileage ?? 0),
+    lastServiceKm: Number(row.lastServiceKm ?? row.last_service_km ?? row.mileage ?? 0),
     owner: row.owner || "",
     note: row.note || "",
     year: row.year ? String(row.year) : "",
     vin: row.vin || "",
-    fuelType: row.fuel_type || "Benzin",
-    insuranceExpiry: row.insurance_expiry || "",
-    inspectionExpiry: row.inspection_expiry || "",
+    fuelType: row.fuelType || row.fuel_type || "Benzin",
+    insuranceExpiry: row.insuranceExpiry || row.insurance_expiry || "",
+    inspectionExpiry: row.inspectionExpiry || row.inspection_expiry || "",
     oilChangeIntervalKm:
-      row.oil_change_interval_km === null || row.oil_change_interval_km === undefined
-        ? ""
-        : Number(row.oil_change_interval_km),
+      row.oilChangeIntervalKm === null || row.oilChangeIntervalKm === undefined
+        ? row.oil_change_interval_km === null || row.oil_change_interval_km === undefined
+          ? ""
+          : Number(row.oil_change_interval_km)
+        : Number(row.oilChangeIntervalKm),
     timingBeltIntervalKm:
-      row.timing_belt_interval_km === null || row.timing_belt_interval_km === undefined
-        ? ""
-        : Number(row.timing_belt_interval_km),
+      row.timingBeltIntervalKm === null || row.timingBeltIntervalKm === undefined
+        ? row.timing_belt_interval_km === null || row.timing_belt_interval_km === undefined
+          ? ""
+          : Number(row.timing_belt_interval_km)
+        : Number(row.timingBeltIntervalKm),
     archived: Boolean(row.archived),
     status: row.status || "active",
     serviceHistory: [],
@@ -498,7 +551,7 @@ const buildDocsFromSupabaseRows = (vehicles, documentRows) => {
       fileName: row.file_name || "",
       fileType: row.file_type || "",
       fileSize: Number(row.file_size || 0),
-      fileDataUrl: row.file_data_url || "",
+      fileDataUrl: row.file_url || row.file_data_url || "",
       uploadedAt: row.uploaded_at || "",
       expiry: row.expiry || next[vehicleKey][docKey].expiry || "",
       note: row.note || "",
@@ -1647,30 +1700,68 @@ const serviceDashboardYearlyCosts = useMemo(() => {
     }
 
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
       const fileDataUrl = typeof reader.result === "string" ? reader.result : "";
+
+      const currentVehicleDocs =
+        documentsByVehicle[String(vehicleId)] || createDefaultVehicleDocs();
+      const currentDoc = currentVehicleDocs[docKey];
+
+      const nextDoc = {
+        ...currentDoc,
+        uploaded: true,
+        fileName: file.name,
+        fileType: file.type,
+        fileSize: file.size,
+        fileDataUrl,
+        uploadedAt: todayIso(),
+      };
 
       setDocumentsByVehicle((prev) => {
         const idKey = String(vehicleId);
         const vehicleDocs = prev[idKey] || createDefaultVehicleDocs();
-        const doc = vehicleDocs[docKey];
-
         return {
           ...prev,
           [idKey]: {
             ...vehicleDocs,
-            [docKey]: {
-              ...doc,
-              uploaded: true,
-              fileName: file.name,
-              fileType: file.type,
-              fileSize: file.size,
-              fileDataUrl,
-              uploadedAt: todayIso(),
-            },
+            [docKey]: nextDoc,
           },
         };
       });
+
+      if (session?.user?.id) {
+        try {
+          const { error } = await supabase
+            .from("vehicle_documents")
+            .upsert(
+              {
+                user_id: session.user.id,
+                vehicle_id: vehicleId,
+                doc_key: docKey,
+                title: nextDoc.title || "",
+                uploaded: true,
+                file_name: file.name,
+                file_type: file.type,
+                file_size: file.size,
+                file_url: fileDataUrl,
+                uploaded_at: nextDoc.uploadedAt || null,
+                expiry: nextDoc.expiry || null,
+                note: nextDoc.note || "",
+              },
+              { onConflict: "vehicle_id,doc_key" }
+            );
+
+          if (error) {
+            console.error("vehicle_documents upload error:", error);
+            showToast("A dokumentum mentése nem sikerült", "error");
+            return;
+          }
+        } catch (error) {
+          console.error("handleFileUpload error:", error);
+          showToast("A dokumentum mentése nem sikerült", "error");
+          return;
+        }
+      }
 
       showSaved("Dokumentum feltöltve");
     };
@@ -2090,13 +2181,19 @@ const buildHealthCsvExport = () => {
     );
   };
 
-  const saveVehicleDetails = () => {
+  const saveVehicleDetails = async () => {
     const resolvedOwner = resolveOwnerValue(
       vehicleDetailsForm.ownerMode,
       vehicleDetailsForm.customOwner
     );
 
     if (!vehicleDetailsForm.name.trim() || !vehicleDetailsForm.plate.trim()) {
+      showToast("A jármű neve és a rendszám kötelező", "error");
+      return;
+    }
+
+    if (!selectedId || !session?.user?.id) {
+      showToast("Nincs aktív bejelentkezett felhasználó", "error");
       return;
     }
 
@@ -2104,54 +2201,121 @@ const buildHealthCsvExport = () => {
       setOwnerOptions((prev) => [...prev, resolvedOwner]);
     }
 
-    setVehicles((prev) =>
-      prev.map((v) =>
-        v.id === selectedId
-          ? {
-              ...v,
-              name: vehicleDetailsForm.name.trim(),
-              plate: vehicleDetailsForm.plate.toUpperCase().trim(),
-              owner: resolvedOwner,
-              note: vehicleDetailsForm.note,
-              year: vehicleDetailsForm.year,
-              vin: vehicleDetailsForm.vin.toUpperCase(),
-              fuelType: vehicleDetailsForm.fuelType,
-              insuranceExpiry: vehicleDetailsForm.insuranceExpiry,
-              inspectionExpiry: vehicleDetailsForm.inspectionExpiry,
-              oilChangeIntervalKm:
-                vehicleDetailsForm.oilChangeIntervalKm === ""
-                  ? ""
-                  : Number(vehicleDetailsForm.oilChangeIntervalKm),
-              timingBeltIntervalKm:
-                vehicleDetailsForm.timingBeltIntervalKm === ""
-                  ? ""
-                  : Number(vehicleDetailsForm.timingBeltIntervalKm),
-            }
-          : v
-      )
-    );
+    const vehiclePayload = {
+      user_id: session.user.id,
+      name: vehicleDetailsForm.name.trim(),
+      plate: vehicleDetailsForm.plate.toUpperCase().trim(),
+      owner: resolvedOwner,
+      note: vehicleDetailsForm.note || "",
+      year: vehicleDetailsForm.year || null,
+      vin: (vehicleDetailsForm.vin || "").toUpperCase(),
+      fuelType: vehicleDetailsForm.fuelType || "Benzin",
+      insuranceExpiry: vehicleDetailsForm.insuranceExpiry || null,
+      inspectionExpiry: vehicleDetailsForm.inspectionExpiry || null,
+      oilChangeIntervalKm:
+        vehicleDetailsForm.oilChangeIntervalKm === ""
+          ? null
+          : Number(vehicleDetailsForm.oilChangeIntervalKm),
+      timingBeltIntervalKm:
+        vehicleDetailsForm.timingBeltIntervalKm === ""
+          ? null
+          : Number(vehicleDetailsForm.timingBeltIntervalKm),
+    };
 
-    setDocumentsByVehicle((prev) => {
+    const nextDocuments = (() => {
       const idKey = String(selectedId);
-      const current = prev[idKey] || createDefaultVehicleDocs();
+      const current = documentsByVehicle[idKey] || createDefaultVehicleDocs();
       return {
-        ...prev,
-        [idKey]: {
-          ...current,
-          insurance: {
-            ...current.insurance,
-            expiry: vehicleDetailsForm.insuranceExpiry || "",
-          },
-          inspection: {
-            ...current.inspection,
-            expiry: vehicleDetailsForm.inspectionExpiry || "",
-          },
+        ...current,
+        insurance: {
+          ...current.insurance,
+          expiry: vehicleDetailsForm.insuranceExpiry || "",
+        },
+        inspection: {
+          ...current.inspection,
+          expiry: vehicleDetailsForm.inspectionExpiry || "",
         },
       };
-    });
+    })();
 
-    setIsVehicleDetailsEditing(false);
-    showSaved("Adatok mentve");
+    try {
+      const { error: vehicleError } = await supabase
+        .from("vehicles")
+        .update(vehiclePayload)
+        .eq("id", selectedId)
+        .eq("user_id", session.user.id);
+
+      if (vehicleError) {
+        console.error("Vehicle update error:", serializeSupabaseError(vehicleError), vehicleError);
+        showToast("Nem sikerült menteni a jármű adatait", "error");
+        return;
+      }
+
+      const documentUpserts = Object.entries(nextDocuments).map(([docKey, doc]) => ({
+        user_id: session.user.id,
+        vehicle_id: selectedId,
+        doc_key: docKey,
+        title: doc.title || "",
+        uploaded: Boolean(doc.uploaded),
+        file_name: doc.fileName || "",
+        file_type: doc.fileType || "",
+        file_size: Number(doc.fileSize || 0),
+        file_url: doc.fileDataUrl || "",
+        uploaded_at: doc.uploadedAt || null,
+        expiry: doc.expiry || null,
+        note: doc.note || "",
+      }));
+
+      if (documentUpserts.length > 0) {
+        const { error: docError } = await supabase
+          .from("vehicle_documents")
+          .upsert(documentUpserts, { onConflict: "vehicle_id,doc_key" });
+
+        if (docError) {
+          console.error("Vehicle document upsert error:", docError);
+          showToast("A dokumentum metaadatok mentése nem sikerült", "error");
+          return;
+        }
+      }
+
+      setVehicles((prev) =>
+        prev.map((v) =>
+          v.id === selectedId
+            ? {
+                ...v,
+                name: vehicleDetailsForm.name.trim(),
+                plate: vehicleDetailsForm.plate.toUpperCase().trim(),
+                owner: resolvedOwner,
+                note: vehicleDetailsForm.note,
+                year: vehicleDetailsForm.year,
+                vin: vehicleDetailsForm.vin.toUpperCase(),
+                fuelType: vehicleDetailsForm.fuelType,
+                insuranceExpiry: vehicleDetailsForm.insuranceExpiry,
+                inspectionExpiry: vehicleDetailsForm.inspectionExpiry,
+                oilChangeIntervalKm:
+                  vehicleDetailsForm.oilChangeIntervalKm === ""
+                    ? ""
+                    : Number(vehicleDetailsForm.oilChangeIntervalKm),
+                timingBeltIntervalKm:
+                  vehicleDetailsForm.timingBeltIntervalKm === ""
+                    ? ""
+                    : Number(vehicleDetailsForm.timingBeltIntervalKm),
+              }
+            : v
+        )
+      );
+
+      setDocumentsByVehicle((prev) => ({
+        ...prev,
+        [String(selectedId)]: nextDocuments,
+      }));
+
+      setIsVehicleDetailsEditing(false);
+      showSaved("Adatok mentve");
+    } catch (error) {
+      console.error("saveVehicleDetails error:", error);
+      showToast("Nem sikerült menteni a jármű adatait", "error");
+    }
   };
 
   const startVehicleDetailsEditing = () => {
@@ -2278,8 +2442,8 @@ const buildHealthCsvExport = () => {
     showSaved("Szerviz rögzítve");
   };
 
-  const addServiceHistoryEntry = () => {
-    if (!selectedVehicle) return;
+  const addServiceHistoryEntry = async () => {
+    if (!selectedVehicle || !session?.user?.id) return;
 
     const kmValue =
       serviceHistoryDraft.km === ""
@@ -2311,40 +2475,82 @@ const buildHealthCsvExport = () => {
       note: serviceHistoryDraft.note.trim(),
     });
 
-    setVehicles((prev) =>
-      prev.map((vehicle) =>
-        vehicle.id === selectedId
-          ? {
-              ...vehicle,
-              currentKm: Math.max(Number(vehicle.currentKm || 0), kmValue),
-              lastServiceKm: kmValue,
-              serviceHistory: [newEntry, ...(Array.isArray(vehicle.serviceHistory) ? vehicle.serviceHistory : [])].slice(0, 50),
-            }
-          : vehicle
-      )
-    );
+    try {
+      const { error: serviceInsertError } = await supabase.from("service_history").insert({
+        user_id: session.user.id,
+        vehicle_id: selectedId,
+        entry_date: serviceHistoryDraft.date,
+        km: kmValue,
+        service_type: resolvedServiceType,
+        cost: costValue,
+        provider: serviceHistoryDraft.provider.trim(),
+        note: serviceHistoryDraft.note.trim(),
+        title: resolvedServiceType,
+      });
 
-    setServiceDraft({
-      currentKm: String(Math.max(Number(selectedVehicle.currentKm || 0), kmValue)),
-      lastServiceKm: String(kmValue),
-    });
+      if (serviceInsertError) {
+        console.error("service_history insert error:", serializeSupabaseError(serviceInsertError), serviceInsertError);
+        showToast("A szerviz bejegyzést nem sikerült menteni", "error");
+        return;
+      }
 
-    setServiceHistoryDraft({
-      date: todayIso(),
-      km: String(Math.max(Number(selectedVehicle.currentKm || 0), kmValue)),
-      serviceType: "general",
-      customServiceType: "",
-      cost: "",
-      provider: "",
-      note: "",
-    });
+      const nextCurrentKm = Math.max(Number(selectedVehicle.currentKm || 0), kmValue);
 
-    showSaved("Szerviz bejegyzés hozzáadva");
+      const { error: vehicleUpdateError } = await supabase
+        .from("vehicles")
+        .update({
+          user_id: session.user.id,
+          currentKm: nextCurrentKm,
+          lastServiceKm: kmValue,
+        })
+        .eq("id", selectedId)
+        .eq("user_id", session.user.id);
+
+      if (vehicleUpdateError) {
+        console.error("vehicles update after service_history error:", vehicleUpdateError);
+        showToast("A jármű km adatait nem sikerült frissíteni", "error");
+        return;
+      }
+
+      setVehicles((prev) =>
+        prev.map((vehicle) =>
+          vehicle.id === selectedId
+            ? {
+                ...vehicle,
+                currentKm: nextCurrentKm,
+                lastServiceKm: kmValue,
+                serviceHistory: [newEntry, ...(Array.isArray(vehicle.serviceHistory) ? vehicle.serviceHistory : [])].slice(0, 50),
+              }
+            : vehicle
+        )
+      );
+
+      setServiceDraft({
+        currentKm: String(nextCurrentKm),
+        lastServiceKm: String(kmValue),
+      });
+
+      setServiceHistoryDraft({
+        date: todayIso(),
+        km: String(nextCurrentKm),
+        serviceType: "general",
+        customServiceType: "",
+        cost: "",
+        provider: "",
+        note: "",
+      });
+
+      showSaved("Szerviz bejegyzés hozzáadva");
+    } catch (error) {
+      console.error("addServiceHistoryEntry error:", error);
+      showToast("A szerviz bejegyzést nem sikerült menteni", "error");
+    }
   };
 
 
-const handleKmUpdate = () => {
-  if (!selectedVehicle) return;
+
+const handleKmUpdate = async () => {
+  if (!selectedVehicle || !session?.user?.id) return;
 
   const kmValue = Number(kmUpdateDraft.km);
   if (!kmUpdateDraft.date || Number.isNaN(kmValue) || kmValue <= 0) {
@@ -2358,49 +2564,112 @@ const handleKmUpdate = () => {
     note: kmUpdateDraft.note.trim(),
   });
 
-  setVehicles((prev) =>
-    prev.map((vehicle) =>
-      vehicle.id === selectedId
-        ? {
-            ...vehicle,
-            currentKm: kmValue,
-            serviceHistory: [newEntry, ...(Array.isArray(vehicle.serviceHistory) ? vehicle.serviceHistory : [])].slice(0, 50),
-          }
-        : vehicle
-    )
-  );
+  try {
+    const { error: kmInsertError } = await supabase.from("km_logs").insert({
+      user_id: session.user.id,
+      vehicle_id: selectedId,
+      entry_date: kmUpdateDraft.date,
+      km: kmValue,
+      note: kmUpdateDraft.note.trim(),
+    });
 
-  setServiceDraft((prev) => ({
-    ...prev,
-    currentKm: String(kmValue),
-  }));
+    if (kmInsertError) {
+      console.error("km_logs insert error:", serializeSupabaseError(kmInsertError), kmInsertError);
+      showToast("A km frissítést nem sikerült menteni", "error");
+      return;
+    }
 
-  setKmUpdateDraft({
-    date: todayIso(),
-    km: "",
-    note: "",
-  });
+    const { error: vehicleUpdateError } = await supabase
+      .from("vehicles")
+      .update({
+        user_id: session.user.id,
+        currentKm: kmValue,
+      })
+      .eq("id", selectedId)
+      .eq("user_id", session.user.id);
 
-  showSaved("Km frissítés mentve");
-};
-
-  const removeServiceHistoryEntry = (entryId) => {
-    if (!selectedVehicle) return;
+    if (vehicleUpdateError) {
+      console.error("vehicles update after km_logs error:", vehicleUpdateError);
+      showToast("A jármű km adatait nem sikerült frissíteni", "error");
+      return;
+    }
 
     setVehicles((prev) =>
       prev.map((vehicle) =>
         vehicle.id === selectedId
           ? {
               ...vehicle,
-              serviceHistory: (Array.isArray(vehicle.serviceHistory) ? vehicle.serviceHistory : []).filter(
-                (entry) => entry.id !== entryId
-              ),
+              currentKm: kmValue,
+              serviceHistory: [newEntry, ...(Array.isArray(vehicle.serviceHistory) ? vehicle.serviceHistory : [])].slice(0, 50),
             }
           : vehicle
       )
     );
 
-    showSaved("Szerviz bejegyzés törölve");
+    setServiceDraft((prev) => ({
+      ...prev,
+      currentKm: String(kmValue),
+    }));
+
+    setKmUpdateDraft({
+      date: todayIso(),
+      km: "",
+      note: "",
+    });
+
+    showSaved("Km frissítés mentve");
+  } catch (error) {
+    console.error("handleKmUpdate error:", error);
+    showToast("A km frissítést nem sikerült menteni", "error");
+  }
+};
+
+
+
+  const removeServiceHistoryEntry = async (entryId) => {
+    if (!selectedVehicle || !session?.user?.id) return;
+
+    const entryToRemove = (Array.isArray(selectedVehicle.serviceHistory) ? selectedVehicle.serviceHistory : [])
+      .map(normalizeServiceHistoryItem)
+      .find((entry) => entry.id === entryId);
+
+    if (!entryToRemove) {
+      showToast("A törlendő bejegyzés nem található", "error");
+      return;
+    }
+
+    try {
+      const targetTable = entryToRemove.isServiceRecord ? "service_history" : "km_logs";
+      const { error } = await supabase
+        .from(targetTable)
+        .delete()
+        .eq("id", entryId)
+        .eq("user_id", session.user.id);
+
+      if (error) {
+        console.error(`${targetTable} delete error:`, error);
+        showToast("Nem sikerült törölni a bejegyzést", "error");
+        return;
+      }
+
+      setVehicles((prev) =>
+        prev.map((vehicle) =>
+          vehicle.id === selectedId
+            ? {
+                ...vehicle,
+                serviceHistory: (Array.isArray(vehicle.serviceHistory) ? vehicle.serviceHistory : []).filter(
+                  (entry) => entry.id !== entryId
+                ),
+              }
+            : vehicle
+        )
+      );
+
+      showSaved("Szerviz bejegyzés törölve");
+    } catch (error) {
+      console.error("removeServiceHistoryEntry error:", error);
+      showToast("Nem sikerült törölni a bejegyzést", "error");
+    }
   };
 
   const addOwnerOption = () => {
@@ -2436,10 +2705,16 @@ const handleKmUpdate = () => {
     showSaved("Tulajdonos törölve");
   };
 
-  const addVehicle = () => {
+  const addVehicle = async () => {
     const resolvedOwner = resolveOwnerValue(form.ownerMode, form.customOwner);
 
     if (!form.name || !form.plate || !form.currentKm || !form.lastServiceKm) {
+      showToast("A név, rendszám és km mezők kötelezők", "error");
+      return;
+    }
+
+    if (!session?.user?.id) {
+      showToast("Nincs aktív bejelentkezett felhasználó", "error");
       return;
     }
 
@@ -2447,159 +2722,369 @@ const handleKmUpdate = () => {
       setOwnerOptions((prev) => [...prev, resolvedOwner]);
     }
 
-    const newVehicle = {
-      id: Date.now(),
-      name: form.name.trim(),
-      plate: form.plate.toUpperCase().trim(),
-      currentKm: Number(form.currentKm),
-      lastServiceKm: Number(form.lastServiceKm),
-      owner: resolvedOwner,
-      note: form.note,
-      year: form.year,
-      vin: form.vin.toUpperCase(),
-      fuelType: form.fuelType,
-      insuranceExpiry: form.insuranceExpiry,
-      inspectionExpiry: form.inspectionExpiry,
-      oilChangeIntervalKm:
-        form.oilChangeIntervalKm === "" ? "" : Number(form.oilChangeIntervalKm),
-      timingBeltIntervalKm:
-        form.timingBeltIntervalKm === "" ? "" : Number(form.timingBeltIntervalKm),
-      archived: false,
-      serviceHistory: [
-        createTimelineEntry({
-          type: "create",
-          title: "Jármű felvéve",
-          detail: `Nyitó állapot: ${formatKmHu(Number(form.currentKm))} km • Utolsó szerviz: ${formatKmHu(Number(form.lastServiceKm))} km`,
-          km: Number(form.currentKm),
-        }),
-      ],
-    };
+    const vehicleInsertPayload = buildVehicleDbPayload(form, resolvedOwner, session.user.id);
+    const vehicleInsertFallbackPayload = buildVehicleDbPayloadFallback(form, session.user.id);
 
-    setVehicles((prev) => [newVehicle, ...prev]);
+    try {
+      let { data: insertedRows, error: vehicleInsertError } = await supabase
+        .from("vehicles")
+        .insert(vehicleInsertPayload)
+        .select("*")
+        .limit(1);
+
+      if (vehicleInsertError) {
+        console.error("vehicles insert error (full payload):", serializeSupabaseError(vehicleInsertError), vehicleInsertError);
+
+        const fallbackResult = await supabase
+          .from("vehicles")
+          .insert(vehicleInsertFallbackPayload)
+          .select("*")
+          .limit(1);
+
+        insertedRows = fallbackResult.data;
+        vehicleInsertError = fallbackResult.error;
+
+        if (vehicleInsertError) {
+          console.error("vehicles insert error (fallback payload):", serializeSupabaseError(vehicleInsertError), vehicleInsertError);
+          showToast(`Az autó mentése nem sikerült: ${serializeSupabaseError(vehicleInsertError)}`, "error");
+          return;
+        }
+      }
+
+      const insertedRow = insertedRows?.[0];
+      if (!insertedRow?.id) {
+        showToast("Az autó létrejött, de az azonosító nem érkezett vissza", "error");
+        return;
+      }
+
+      const docSeed = createDefaultVehicleDocs(
+        form.insuranceExpiry,
+        form.inspectionExpiry
+      );
+
+      const documentUpserts = Object.entries(docSeed).map(([docKey, doc]) => ({
+        user_id: session.user.id,
+        vehicle_id: insertedRow.id,
+        doc_key: docKey,
+        title: doc.title || "",
+        uploaded: Boolean(doc.uploaded),
+        file_name: doc.fileName || "",
+        file_type: doc.fileType || "",
+        file_size: Number(doc.fileSize || 0),
+        file_url: doc.fileDataUrl || "",
+        uploaded_at: doc.uploadedAt || null,
+        expiry: doc.expiry || null,
+        note: doc.note || "",
+      }));
+
+      if (documentUpserts.length > 0) {
+        const { error: docSeedError } = await supabase
+          .from("vehicle_documents")
+          .upsert(documentUpserts, { onConflict: "vehicle_id,doc_key" });
+
+        if (docSeedError) {
+          console.error("vehicle_documents seed error:", serializeSupabaseError(docSeedError), docSeedError);
+        }
+      }
+
+      const hydratedInsertedRow = {
+        ...insertedRow,
+        owner: insertedRow?.owner ?? resolvedOwner,
+        note: insertedRow?.note ?? (form.note || ""),
+        year: insertedRow?.year ?? (form.year || null),
+        vin: insertedRow?.vin ?? ((form.vin || "").toUpperCase()),
+        fuelType: insertedRow?.fuelType ?? insertedRow?.fuel_type ?? (form.fuelType || "Benzin"),
+        insuranceExpiry: insertedRow?.insuranceExpiry ?? insertedRow?.insurance_expiry ?? (form.insuranceExpiry || null),
+        inspectionExpiry: insertedRow?.inspectionExpiry ?? insertedRow?.inspection_expiry ?? (form.inspectionExpiry || null),
+        oilChangeIntervalKm:
+          insertedRow?.oilChangeIntervalKm ?? insertedRow?.oil_change_interval_km ??
+          (form.oilChangeIntervalKm === "" ? null : Number(form.oilChangeIntervalKm)),
+        timingBeltIntervalKm:
+          insertedRow?.timingBeltIntervalKm ?? insertedRow?.timing_belt_interval_km ??
+          (form.timingBeltIntervalKm === "" ? null : Number(form.timingBeltIntervalKm)),
+        archived: insertedRow?.archived ?? false,
+        status: insertedRow?.status ?? "active",
+      };
+
+      const newVehicle = ensureVehicleHistory(mapSupabaseVehicleRow(hydratedInsertedRow));
+
+      setVehicles((prev) => [newVehicle, ...prev]);
+
+      setDocumentsByVehicle((prev) => ({
+        ...prev,
+        [String(newVehicle.id)]: docSeed,
+      }));
+
+      setSelectedId(newVehicle.id);
+
+      setForm({
+        name: "",
+        plate: "",
+        currentKm: "",
+        lastServiceKm: "",
+        ownerMode: ownerOptions[0] || CUSTOM_OWNER_VALUE,
+        customOwner: "",
+        note: "",
+        year: "",
+        vin: "",
+        fuelType: "Benzin",
+        insuranceExpiry: "",
+        inspectionExpiry: "",
+        oilChangeIntervalKm: "15000",
+        timingBeltIntervalKm: "180000",
+      });
+
+      setOpen(false);
+      setActivePage("adatok");
+      setIsVehicleDetailsEditing(false);
+      showSaved("Új autó felvéve");
+    } catch (error) {
+      console.error("addVehicle error:", error);
+      showToast("Az autó mentése nem sikerült", "error");
+    }
+  };
+
+  const archiveSelectedVehicle = async () => {
+    if (!vehicleToArchive || !session?.user?.id) return;
+
+    try {
+      const { error } = await supabase
+        .from("vehicles")
+        .update({ archived: true, user_id: session.user.id })
+        .eq("id", vehicleToArchive.id)
+        .eq("user_id", session.user.id);
+
+      if (error) {
+        console.error("archive vehicle error:", error);
+        showToast("A jármű archiválása nem sikerült", "error");
+        return;
+      }
+
+      setVehicles((prev) =>
+        prev.map((vehicle) =>
+          vehicle.id === vehicleToArchive.id
+            ? {
+                ...vehicle,
+                archived: true,
+              }
+            : vehicle
+        )
+      );
+
+      setVehicleToArchive(null);
+      showSaved("Jármű archiválva");
+    } catch (error) {
+      console.error("archiveSelectedVehicle error:", error);
+      showToast("A jármű archiválása nem sikerült", "error");
+    }
+  };
+
+  const restoreVehicle = async (vehicleId) => {
+    if (!session?.user?.id) return;
+
+    try {
+      const { error } = await supabase
+        .from("vehicles")
+        .update({ archived: false, user_id: session.user.id })
+        .eq("id", vehicleId)
+        .eq("user_id", session.user.id);
+
+      if (error) {
+        console.error("restore vehicle error:", error);
+        showToast("A jármű visszaállítása nem sikerült", "error");
+        return;
+      }
+
+      setVehicles((prev) =>
+        prev.map((vehicle) =>
+          vehicle.id === vehicleId
+            ? {
+                ...vehicle,
+                archived: false,
+              }
+            : vehicle
+        )
+      );
+
+      setSelectedId(vehicleId);
+      showSaved("Jármű visszaállítva");
+    } catch (error) {
+      console.error("restoreVehicle error:", error);
+      showToast("A jármű visszaállítása nem sikerült", "error");
+    }
+  };
+
+  const deleteVehiclePermanently = async () => {
+    if (!vehicleToDelete || !session?.user?.id) return;
+
+    try {
+      const vehicleId = vehicleToDelete.id;
+
+      const { error: docsDeleteError } = await supabase
+        .from("vehicle_documents")
+        .delete()
+        .eq("vehicle_id", vehicleId)
+        .eq("user_id", session.user.id);
+
+      if (docsDeleteError) {
+        console.error("vehicle_documents delete error:", docsDeleteError);
+      }
+
+      const { error: serviceDeleteError } = await supabase
+        .from("service_history")
+        .delete()
+        .eq("vehicle_id", vehicleId)
+        .eq("user_id", session.user.id);
+
+      if (serviceDeleteError) {
+        console.error("service_history delete error:", serviceDeleteError);
+      }
+
+      const { error: kmDeleteError } = await supabase
+        .from("km_logs")
+        .delete()
+        .eq("vehicle_id", vehicleId)
+        .eq("user_id", session.user.id);
+
+      if (kmDeleteError) {
+        console.error("km_logs delete error:", kmDeleteError);
+      }
+
+      const { error: vehicleDeleteError } = await supabase
+        .from("vehicles")
+        .delete()
+        .eq("id", vehicleId)
+        .eq("user_id", session.user.id);
+
+      if (vehicleDeleteError) {
+        console.error("vehicles delete error:", vehicleDeleteError);
+        showToast("A jármű törlése nem sikerült", "error");
+        return;
+      }
+
+      setVehicles((prev) => prev.filter((vehicle) => vehicle.id !== vehicleId));
+
+      setDocumentsByVehicle((prev) => {
+        const next = { ...prev };
+        delete next[String(vehicleId)];
+        return next;
+      });
+
+      setVehicleToDelete(null);
+      showSaved("Jármű véglegesen törölve");
+    } catch (error) {
+      console.error("deleteVehiclePermanently error:", error);
+      showToast("A jármű törlése nem sikerült", "error");
+    }
+  };
+
+  const updateDocField = async (vehicleId, docKey, field, value) => {
+    const idKey = String(vehicleId);
+    const vehicleDocs = documentsByVehicle[idKey] || createDefaultVehicleDocs();
+    const doc = vehicleDocs[docKey];
+
+    const nextDoc = {
+      ...doc,
+      [field]: value,
+    };
 
     setDocumentsByVehicle((prev) => ({
       ...prev,
-      [String(newVehicle.id)]: createDefaultVehicleDocs(
-        form.insuranceExpiry,
-        form.inspectionExpiry
-      ),
+      [idKey]: {
+        ...(prev[idKey] || createDefaultVehicleDocs()),
+        [docKey]: nextDoc,
+      },
     }));
 
-    setSelectedId(newVehicle.id);
+    if (!session?.user?.id) return;
 
-    setForm({
-      name: "",
-      plate: "",
-      currentKm: "",
-      lastServiceKm: "",
-      ownerMode: ownerOptions[0] || CUSTOM_OWNER_VALUE,
-      customOwner: "",
-      note: "",
-      year: "",
-      vin: "",
-      fuelType: "Benzin",
-      insuranceExpiry: "",
-      inspectionExpiry: "",
-      oilChangeIntervalKm: "15000",
-      timingBeltIntervalKm: "180000",
-    });
-
-    setOpen(false);
-    setActivePage("adatok");
-    setIsVehicleDetailsEditing(false);
-    showSaved("Új autó felvéve");
-  };
-
-  const archiveSelectedVehicle = () => {
-    if (!vehicleToArchive) return;
-
-    setVehicles((prev) =>
-      prev.map((vehicle) =>
-        vehicle.id === vehicleToArchive.id
-          ? {
-              ...vehicle,
-              archived: true,
-            }
-          : vehicle
-      )
-    );
-
-    setVehicleToArchive(null);
-    showSaved("Jármű archiválva");
-  };
-
-  const restoreVehicle = (vehicleId) => {
-    setVehicles((prev) =>
-      prev.map((vehicle) =>
-        vehicle.id === vehicleId
-          ? {
-              ...vehicle,
-              archived: false,
-            }
-          : vehicle
-      )
-    );
-
-    setSelectedId(vehicleId);
-    showSaved("Jármű visszaállítva");
-  };
-
-  const deleteVehiclePermanently = () => {
-    if (!vehicleToDelete) return;
-
-    setVehicles((prev) => prev.filter((vehicle) => vehicle.id !== vehicleToDelete.id));
-
-    setDocumentsByVehicle((prev) => {
-      const next = { ...prev };
-      delete next[String(vehicleToDelete.id)];
-      return next;
-    });
-
-    setVehicleToDelete(null);
-    showSaved("Jármű véglegesen törölve");
-  };
-
-  const updateDocField = (vehicleId, docKey, field, value) => {
-    setDocumentsByVehicle((prev) => {
-      const idKey = String(vehicleId);
-      const vehicleDocs = prev[idKey] || createDefaultVehicleDocs();
-      const doc = vehicleDocs[docKey];
-
-      return {
-        ...prev,
-        [idKey]: {
-          ...vehicleDocs,
-          [docKey]: {
-            ...doc,
-            [field]: value,
+    try {
+      const { error } = await supabase
+        .from("vehicle_documents")
+        .upsert(
+          {
+            user_id: session.user.id,
+            vehicle_id: vehicleId,
+            doc_key: docKey,
+            title: nextDoc.title || "",
+            uploaded: Boolean(nextDoc.uploaded),
+            file_name: nextDoc.fileName || "",
+            file_type: nextDoc.fileType || "",
+            file_size: Number(nextDoc.fileSize || 0),
+            file_url: nextDoc.fileDataUrl || "",
+            uploaded_at: nextDoc.uploadedAt || null,
+            expiry: nextDoc.expiry || null,
+            note: nextDoc.note || "",
           },
-        },
-      };
-    });
+          { onConflict: "vehicle_id,doc_key" }
+        );
+
+      if (error) {
+        console.error("vehicle_documents upsert error:", error);
+        showToast("A dokumentum mező mentése nem sikerült", "error");
+      }
+    } catch (error) {
+      console.error("updateDocField error:", error);
+      showToast("A dokumentum mező mentése nem sikerült", "error");
+    }
   };
 
-  const removeDocument = (vehicleId, docKey) => {
-    setDocumentsByVehicle((prev) => {
-      const idKey = String(vehicleId);
-      const vehicleDocs = prev[idKey] || createDefaultVehicleDocs();
-      const doc = vehicleDocs[docKey];
+  const removeDocument = async (vehicleId, docKey) => {
+    const idKey = String(vehicleId);
+    const vehicleDocs = documentsByVehicle[idKey] || createDefaultVehicleDocs();
+    const doc = vehicleDocs[docKey];
 
-      return {
-        ...prev,
-        [idKey]: {
-          ...vehicleDocs,
-          [docKey]: {
-            ...doc,
-            uploaded: false,
-            fileName: "",
-            fileType: "",
-            fileSize: 0,
-            fileDataUrl: "",
-            uploadedAt: "",
-          },
-        },
-      };
-    });
+    const nextDoc = {
+      ...doc,
+      uploaded: false,
+      fileName: "",
+      fileType: "",
+      fileSize: 0,
+      fileDataUrl: "",
+      uploadedAt: "",
+    };
+
+    setDocumentsByVehicle((prev) => ({
+      ...prev,
+      [idKey]: {
+        ...(prev[idKey] || createDefaultVehicleDocs()),
+        [docKey]: nextDoc,
+      },
+    }));
+
+    if (session?.user?.id) {
+      try {
+        const { error } = await supabase
+          .from("vehicle_documents")
+          .upsert(
+            {
+              user_id: session.user.id,
+              vehicle_id: vehicleId,
+              doc_key: docKey,
+              title: nextDoc.title || "",
+              uploaded: false,
+              file_name: "",
+              file_type: "",
+              file_size: 0,
+              file_url: "",
+              uploaded_at: null,
+              expiry: nextDoc.expiry || null,
+              note: nextDoc.note || "",
+            },
+            { onConflict: "vehicle_id,doc_key" }
+          );
+
+        if (error) {
+          console.error("vehicle_documents remove upload error:", error);
+          showToast("A dokumentum eltávolítása nem sikerült", "error");
+          return;
+        }
+      } catch (error) {
+        console.error("removeDocument error:", error);
+        showToast("A dokumentum eltávolítása nem sikerült", "error");
+        return;
+      }
+    }
 
     showSaved("Dokumentum eltávolítva");
   };
