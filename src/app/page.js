@@ -345,6 +345,170 @@ const buildFleetHealthTrend = (score, vehicles, notifications) => {
   });
 };
 
+
+const ensureVehicleHistory = (vehicle) => {
+  const existingHistory = Array.isArray(vehicle?.serviceHistory)
+    ? vehicle.serviceHistory.map(normalizeServiceHistoryItem)
+    : [];
+
+  if (existingHistory.length > 0) {
+    return { ...vehicle, serviceHistory: existingHistory };
+  }
+
+  return {
+    ...vehicle,
+    serviceHistory: [
+      normalizeServiceHistoryItem(
+        createTimelineEntry({
+          type: "baseline",
+          title: "Kiinduló állapot",
+          detail: `${formatKmHu(vehicle?.currentKm || 0)} km aktuális futás, ${formatKmHu(
+            vehicle?.lastServiceKm || 0
+          )} km utolsó szerviz.`,
+          km: vehicle?.currentKm || 0,
+        })
+      ),
+    ],
+  };
+};
+
+const mapSupabaseVehicleRow = (row) =>
+  ensureVehicleHistory({
+    id: row.id,
+    name:
+      row.name ||
+      [row.brand, row.model].filter(Boolean).join(" ") ||
+      row.plate ||
+      `Jármű ${row.id}`,
+    plate: row.plate || "",
+    currentKm: Number(row.current_km ?? row.mileage ?? 0),
+    lastServiceKm: Number(row.last_service_km ?? row.mileage ?? 0),
+    owner: row.owner || "",
+    note: row.note || "",
+    year: row.year ? String(row.year) : "",
+    vin: row.vin || "",
+    fuelType: row.fuel_type || "Benzin",
+    insuranceExpiry: row.insurance_expiry || "",
+    inspectionExpiry: row.inspection_expiry || "",
+    oilChangeIntervalKm:
+      row.oil_change_interval_km === null || row.oil_change_interval_km === undefined
+        ? ""
+        : Number(row.oil_change_interval_km),
+    timingBeltIntervalKm:
+      row.timing_belt_interval_km === null || row.timing_belt_interval_km === undefined
+        ? ""
+        : Number(row.timing_belt_interval_km),
+    archived: Boolean(row.archived),
+    status: row.status || "active",
+    serviceHistory: [],
+  });
+
+const mapSupabaseServiceRow = (row) =>
+  normalizeServiceHistoryItem({
+    id: row.id,
+    date: row.entry_date || row.date || todayIso(),
+    type: "service-record",
+    title: row.service_type || row.title || "Szerviz",
+    detail: [
+      row.provider ? `Partner: ${row.provider}` : null,
+      Number(row.cost || 0) > 0 ? `Költség: ${formatCurrencyHu(Number(row.cost || 0))}` : null,
+      row.note ? `Megjegyzés: ${row.note}` : null,
+    ]
+      .filter(Boolean)
+      .join(" • "),
+    km:
+      row.km === null || row.km === undefined || Number.isNaN(Number(row.km))
+        ? null
+        : Number(row.km),
+    serviceType: row.service_type || row.title || "Szerviz",
+    cost: Number(row.cost || 0),
+    provider: row.provider || "",
+    note: row.note || "",
+    isServiceRecord: true,
+  });
+
+const mapSupabaseKmRow = (row) =>
+  normalizeServiceHistoryItem({
+    id: row.id,
+    date: row.entry_date || row.date || todayIso(),
+    type: "km-update",
+    title: "Km frissítés",
+    detail: row.note ? `Megjegyzés: ${row.note}` : "Futásteljesítmény frissítve",
+    km:
+      row.km === null || row.km === undefined || Number.isNaN(Number(row.km))
+        ? null
+        : Number(row.km),
+    serviceType: "",
+    cost: 0,
+    provider: "",
+    note: row.note || "",
+    isServiceRecord: false,
+  });
+
+const attachHistoryToVehicles = (vehicleRows, serviceRows, kmRows) => {
+  const historyByVehicle = {};
+
+  (serviceRows || []).forEach((row) => {
+    const key = row.vehicle_id;
+    if (!historyByVehicle[key]) historyByVehicle[key] = [];
+    historyByVehicle[key].push(mapSupabaseServiceRow(row));
+  });
+
+  (kmRows || []).forEach((row) => {
+    const key = row.vehicle_id;
+    if (!historyByVehicle[key]) historyByVehicle[key] = [];
+    historyByVehicle[key].push(mapSupabaseKmRow(row));
+  });
+
+  return (vehicleRows || []).map((row) => {
+    const mapped = mapSupabaseVehicleRow(row);
+    const combinedHistory = (historyByVehicle[row.id] || []).sort((a, b) => {
+      const dateDiff = String(b.date || "").localeCompare(String(a.date || ""));
+      if (dateDiff !== 0) return dateDiff;
+      return Number(b.km || 0) - Number(a.km || 0);
+    });
+
+    return ensureVehicleHistory({
+      ...mapped,
+      serviceHistory: combinedHistory,
+    });
+  });
+};
+
+const buildDocsFromSupabaseRows = (vehicles, documentRows) => {
+  const next = {};
+
+  vehicles.forEach((vehicle) => {
+    next[String(vehicle.id)] = createDefaultVehicleDocs(
+      vehicle.insuranceExpiry,
+      vehicle.inspectionExpiry
+    );
+  });
+
+  (documentRows || []).forEach((row) => {
+    const vehicleKey = String(row.vehicle_id);
+    if (!next[vehicleKey]) return;
+    const docKey = row.doc_key;
+    if (!docKey || !next[vehicleKey][docKey]) return;
+
+    next[vehicleKey][docKey] = {
+      ...next[vehicleKey][docKey],
+      title: row.title || next[vehicleKey][docKey].title,
+      uploaded: Boolean(row.uploaded),
+      fileName: row.file_name || "",
+      fileType: row.file_type || "",
+      fileSize: Number(row.file_size || 0),
+      fileDataUrl: row.file_data_url || "",
+      uploadedAt: row.uploaded_at || "",
+      expiry: row.expiry || next[vehicleKey][docKey].expiry || "",
+      note: row.note || "",
+    };
+  });
+
+  return next;
+};
+
+
 const buildPredictiveService = (vehicle) => {
   if (!vehicle) return null;
 
@@ -524,111 +688,200 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
   note: "",
 });
 
-  const ensureVehicleHistory = (vehicle) => {
-    const existingHistory = Array.isArray(vehicle?.serviceHistory)
-      ? vehicle.serviceHistory.map(normalizeServiceHistoryItem)
-      : [];
-    if (existingHistory.length > 0) {
-      return { ...vehicle, serviceHistory: existingHistory };
-    }
-    return {
-      ...vehicle,
-      serviceHistory: [
-        normalizeServiceHistoryItem(
-          createTimelineEntry({
-            type: "baseline",
-            title: "Kiinduló állapot",
-            detail: `${formatKmHu(vehicle?.currentKm || 0)} km aktuális futás, ${formatKmHu(
-              vehicle?.lastServiceKm || 0
-            )} km utolsó szerviz.`,
-            km: vehicle?.currentKm || 0,
-          })
-        ),
-      ],
-    };
-  };
 
   useEffect(() => {
-    let mounted = true;
+    let isMounted = true;
 
-    const loadSession = async () => {
-      const { data, error } = await supabase.auth.getSession();
-
-      if (error) {
-        console.error("Auth session load error:", error);
+    const resetBrokenAuthState = async () => {
+      try {
+        await supabase.auth.signOut({ scope: "local" });
+      } catch (signOutError) {
+        console.error("Supabase local signOut error:", signOutError);
       }
 
-      if (mounted) {
-        setSession(data?.session ?? null);
-        setAuthReady(true);
+      if (!isMounted) return;
+
+      setSession(null);
+      setHydrated(true);
+      setToast({
+        id: Date.now(),
+        type: "error",
+        message: "A bejelentkezési munkamenet lejárt vagy sérült volt. Jelentkezz be újra.",
+      });
+    };
+
+    const initializeAuth = async () => {
+      try {
+        const { data, error } = await supabase.auth.getSession();
+
+        if (error) {
+          const authMessage = String(error.message || "").toLowerCase();
+          if (
+            authMessage.includes("refresh token") ||
+            authMessage.includes("invalid") ||
+            authMessage.includes("jwt")
+          ) {
+            await resetBrokenAuthState();
+          } else {
+            console.error("Supabase getSession error:", error);
+            if (isMounted) setSession(null);
+          }
+        } else if (isMounted) {
+          const nextSession = data?.session ?? null;
+          setSession(nextSession);
+          if (!nextSession) {
+            setHydrated(true);
+          }
+        }
+      } catch (error) {
+        console.error("Supabase auth init error:", error);
+        if (isMounted) setSession(null);
+      } finally {
+        if (isMounted) setAuthReady(true);
       }
     };
 
-    loadSession();
+    initializeAuth();
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+    } = supabase.auth.onAuthStateChange(async (event, nextSession) => {
+      if (!isMounted) return;
+
+      if (event === "SIGNED_OUT") {
+        setSession(null);
+        setHydrated(true);
+        setAuthReady(true);
+        return;
+      }
+
+      if (event === "TOKEN_REFRESH_FAILED") {
+        await resetBrokenAuthState();
+        setAuthReady(true);
+        return;
+      }
+
       setSession(nextSession ?? null);
+      if (!nextSession) {
+        setHydrated(true);
+      }
       setAuthReady(true);
     });
 
     return () => {
-      mounted = false;
-      subscription.unsubscribe();
+      isMounted = false;
+      subscription?.unsubscribe();
     };
   }, []);
 
+
   useEffect(() => {
-    const savedVehicles = safeRead(STORAGE_KEYS.vehicles, initialVehicles).map(ensureVehicleHistory);
-    const savedOwners = safeRead(STORAGE_KEYS.owners, initialOwnerOptions);
-    const savedDocs = safeRead(STORAGE_KEYS.docs, createInitialDocsMap(savedVehicles));
-    const savedEmail = safeRead(STORAGE_KEYS.email, defaultEmailSettings);
-    const savedAck = safeRead(STORAGE_KEYS.ack, {});
-    const savedDismissed = safeRead(STORAGE_KEYS.dismissed, {});
-    const savedUi = safeRead(STORAGE_KEYS.ui, {
-      selectedId: savedVehicles[0]?.id ?? null,
-      activePage: "szerviz",
-      query: "",
-      filter: "all",
-      exportIncludeArchived: true,
-      exportOptions: {
-        fullJson: true,
-        vehiclesCsv: false,
-        documentsCsv: false,
-        serviceHistoryCsv: false,
-        healthCsv: false,
-      },
-    });
+    if (!authReady || !session?.user?.id) return;
 
-    setVehicles(savedVehicles);
-    setOwnerOptions(savedOwners);
-    setDocumentsByVehicle(savedDocs);
-    setEmailSettings(savedEmail);
-    setAcknowledgedNotifications(savedAck);
-    setDismissedNotifications(savedDismissed);
+    const initializeApp = async () => {
+      const savedOwners = safeRead(STORAGE_KEYS.owners, initialOwnerOptions);
+      const savedEmail = safeRead(STORAGE_KEYS.email, defaultEmailSettings);
+      const savedAck = safeRead(STORAGE_KEYS.ack, {});
+      const savedDismissed = safeRead(STORAGE_KEYS.dismissed, {});
+      const savedUi = safeRead(STORAGE_KEYS.ui, {
+        selectedId: null,
+        activePage: "szerviz",
+        query: "",
+        filter: "all",
+        exportIncludeArchived: true,
+        exportOptions: {
+          fullJson: true,
+          vehiclesCsv: false,
+          documentsCsv: false,
+          serviceHistoryCsv: false,
+          healthCsv: false,
+        },
+      });
 
-    setSelectedId(savedUi.selectedId ?? savedVehicles[0]?.id ?? null);
-    setActivePage(savedUi.activePage || "szerviz");
-    setQuery(savedUi.query || "");
-    setFilter(savedUi.filter || "all");
-    setExportIncludeArchived(
-      typeof savedUi.exportIncludeArchived === "boolean"
-        ? savedUi.exportIncludeArchived
-        : true
-    );
-    setExportOptions(
-      savedUi.exportOptions || {
-        fullJson: true,
-        vehiclesCsv: false,
-        documentsCsv: false,
-        serviceHistoryCsv: false,
-        healthCsv: false,
+      setOwnerOptions(savedOwners);
+      setEmailSettings(savedEmail);
+      setAcknowledgedNotifications(savedAck);
+      setDismissedNotifications(savedDismissed);
+      setActivePage(savedUi.activePage || "szerviz");
+      setQuery(savedUi.query || "");
+      setFilter(savedUi.filter || "all");
+      setExportIncludeArchived(
+        typeof savedUi.exportIncludeArchived === "boolean"
+          ? savedUi.exportIncludeArchived
+          : true
+      );
+      setExportOptions(
+        savedUi.exportOptions || {
+          fullJson: true,
+          vehiclesCsv: false,
+          documentsCsv: false,
+          serviceHistoryCsv: false,
+          healthCsv: false,
+        }
+      );
+
+      try {
+        const userId = session.user.id;
+
+        const [vehiclesResult, serviceResult, kmResult, docsResult] = await Promise.all([
+          supabase
+            .from("vehicles")
+            .select("*")
+            .eq("user_id", userId)
+            .order("id", { ascending: false }),
+          supabase
+            .from("service_history")
+            .select("*")
+            .eq("user_id", userId)
+            .order("entry_date", { ascending: false }),
+          supabase
+            .from("km_logs")
+            .select("*")
+            .eq("user_id", userId)
+            .order("entry_date", { ascending: false }),
+          supabase
+            .from("vehicle_documents")
+            .select("*")
+            .eq("user_id", userId),
+        ]);
+
+        if (vehiclesResult.error) {
+          console.error("Supabase vehicle load error:", vehiclesResult.error);
+        }
+        if (serviceResult.error) {
+          console.error("Supabase service_history load error:", serviceResult.error);
+        }
+        if (kmResult.error) {
+          console.error("Supabase km_logs load error:", kmResult.error);
+        }
+        if (docsResult.error) {
+          console.error("Supabase vehicle_documents load error:", docsResult.error);
+        }
+
+        const loadedVehicles = attachHistoryToVehicles(
+          vehiclesResult.data || [],
+          serviceResult.data || [],
+          kmResult.data || []
+        );
+
+        setVehicles(loadedVehicles);
+        setDocumentsByVehicle(buildDocsFromSupabaseRows(loadedVehicles, docsResult.data || []));
+
+        const savedSelectedId = savedUi.selectedId ?? null;
+        const selectedExists = loadedVehicles.some((vehicle) => vehicle.id === savedSelectedId);
+        setSelectedId(selectedExists ? savedSelectedId : loadedVehicles[0]?.id ?? null);
+      } catch (error) {
+        console.error("Vehicle initialization error:", error);
+        setVehicles([]);
+        setDocumentsByVehicle({});
+        setSelectedId(null);
+      } finally {
+        setHydrated(true);
       }
-    );
+    };
 
-    setHydrated(true);
-  }, []);
+    initializeApp();
+  }, [authReady, session?.user?.id]);
 
   useEffect(() => {
     if (!hydrated) return;
