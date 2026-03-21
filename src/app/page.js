@@ -27,6 +27,7 @@ import {
   Archive,
   RotateCcw,
   Mail,
+  LogOut,
   Upload,
   Info,
   Activity,
@@ -359,21 +360,26 @@ const attachHistoryToVehicles = (vehiclesList = [], serviceRows = [], kmRows = [
   });
 };
 
-const fetchVehicleHistoryRows = async (vehicleId) => {
+const fetchVehicleHistoryRows = async (vehicleId, userId = null) => {
+  let serviceQuery = supabase
+    .from("service_history")
+    .select("*")
+    .eq("vehicle_id", vehicleId);
+
+  let kmQuery = supabase
+    .from("km_logs")
+    .select("*")
+    .eq("vehicle_id", vehicleId);
+
+  if (userId) {
+    serviceQuery = serviceQuery.eq("user_id", userId);
+    kmQuery = kmQuery.eq("user_id", userId);
+  }
+
   const [{ data: serviceRows, error: serviceError }, { data: kmRows, error: kmError }] =
     await Promise.all([
-      supabase
-        .from("service_history")
-        .select("*")
-        .eq("vehicle_id", vehicleId)
-        .order("entry_date", { ascending: false })
-        .order("created_at", { ascending: false }),
-      supabase
-        .from("km_logs")
-        .select("*")
-        .eq("vehicle_id", vehicleId)
-        .order("entry_date", { ascending: false })
-        .order("created_at", { ascending: false }),
+      serviceQuery.order("entry_date", { ascending: false }).order("created_at", { ascending: false }),
+      kmQuery.order("entry_date", { ascending: false }).order("created_at", { ascending: false }),
     ]);
 
   return {
@@ -382,95 +388,6 @@ const fetchVehicleHistoryRows = async (vehicleId) => {
     error: serviceError || kmError || null,
   };
 };
-
-
-const DOCUMENTS_BUCKET = "vehicle-documents";
-
-const mapVehicleDocumentsRowsToMap = (vehiclesList = [], rows = []) => {
-  const baseMap = createInitialDocsMap(Array.isArray(vehiclesList) ? vehiclesList : []);
-
-  (Array.isArray(rows) ? rows : []).forEach((row) => {
-    const idKey = String(row?.vehicle_id);
-    if (!baseMap[idKey]) baseMap[idKey] = createDefaultVehicleDocs();
-
-    const existingDoc = baseMap[idKey]?.[row?.doc_key];
-    if (!existingDoc) return;
-
-    baseMap[idKey][row.doc_key] = {
-      ...existingDoc,
-      title: row?.title || existingDoc.title,
-      uploaded: Boolean(row?.uploaded),
-      fileName: row?.file_name || "",
-      fileType: row?.file_type || "",
-      fileSize:
-        row?.file_size === null || row?.file_size === undefined || Number.isNaN(Number(row?.file_size))
-          ? 0
-          : Number(row.file_size),
-      filePath: row?.file_path || "",
-      fileUrl: row?.file_url || "",
-      fileDataUrl: row?.file_url || "",
-      uploadedAt: row?.uploaded_at || "",
-      expiry: row?.expiry || existingDoc.expiry || "",
-      note: row?.note || "",
-    };
-  });
-
-  return baseMap;
-};
-
-const fetchVehicleDocumentRows = async () => {
-  const { data, error } = await supabase
-    .from("vehicle_documents")
-    .select("*")
-    .order("vehicle_id", { ascending: true });
-
-  return {
-    rows: data || [],
-    error: error || null,
-  };
-};
-
-const buildDocumentStoragePath = (vehicleId, docKey, fileName) => {
-  const extension = (fileName || "").includes(".")
-    ? `.${String(fileName).split(".").pop().toLowerCase()}`
-    : "";
-  const safeDocKey = String(docKey || "document").replace(/[^a-zA-Z0-9_-]/g, "-");
-  return `${vehicleId}/${safeDocKey}-${Date.now()}${extension}`;
-};
-
-const getStoredDocumentUrl = (filePath) => {
-  if (!filePath) return "";
-  const { data } = supabase.storage.from(DOCUMENTS_BUCKET).getPublicUrl(filePath);
-  return data?.publicUrl || "";
-};
-
-const upsertVehicleDocumentRow = async ({ vehicleId, docKey, doc }) => {
-  const payload = {
-    vehicle_id: vehicleId,
-    doc_key: docKey,
-    title: doc?.title || "",
-    uploaded: Boolean(doc?.uploaded),
-    file_name: doc?.fileName || "",
-    file_type: doc?.fileType || "",
-    file_size: Number(doc?.fileSize || 0),
-    file_path: doc?.filePath || "",
-    file_url: doc?.fileUrl || "",
-    uploaded_at: doc?.uploadedAt || null,
-    expiry: doc?.expiry || null,
-    note: doc?.note || "",
-  };
-
-  const { data, error } = await supabase
-    .from("vehicle_documents")
-    .upsert(payload, { onConflict: "vehicle_id,doc_key" })
-    .select();
-
-  return {
-    row: data?.[0] || null,
-    error: error || null,
-  };
-};
-
 
 const OIL_SERVICE_LABEL = "Olajcsere";
 const TIMING_SERVICE_LABEL = "Vezérlés csere";
@@ -692,6 +609,11 @@ const buildPredictiveService = (vehicle) => {
 
 export default function Home() {
   const [hydrated, setHydrated] = useState(false);
+  const [authReady, setAuthReady] = useState(false);
+  const [session, setSession] = useState(null);
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authSubmitting, setAuthSubmitting] = useState(false);
 
   const [vehicles, setVehicles] = useState(initialVehicles);
   const [ownerOptions, setOwnerOptions] = useState(initialOwnerOptions);
@@ -789,6 +711,9 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
   note: "",
 });
 
+  const currentUser = session?.user ?? null;
+  const scopedStorageKey = (key) => (currentUser?.id ? `${key}-${currentUser.id}` : key);
+
   const ensureVehicleHistory = (vehicle) => {
     const existingHistory = Array.isArray(vehicle?.serviceHistory)
       ? vehicle.serviceHistory.map(normalizeServiceHistoryItem)
@@ -813,15 +738,87 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
     };
   };
 
-  useEffect(() => {
-    const initializeApp = async () => {
-      const fallbackVehicles = safeRead(STORAGE_KEYS.vehicles, initialVehicles).map(ensureVehicleHistory);
 
-      const savedOwners = safeRead(STORAGE_KEYS.owners, initialOwnerOptions);
-      const savedEmail = safeRead(STORAGE_KEYS.email, defaultEmailSettings);
-      const savedAck = safeRead(STORAGE_KEYS.ack, {});
-      const savedDismissed = safeRead(STORAGE_KEYS.dismissed, {});
-      const savedUi = safeRead(STORAGE_KEYS.ui, {
+  useEffect(() => {
+    let isMounted = true;
+
+    const initAuth = async () => {
+      const { data, error } = await supabase.auth.getSession();
+      if (error) {
+        console.error("Auth session load error:", error);
+      }
+      if (isMounted) {
+        setSession(data?.session ?? null);
+        setAuthReady(true);
+      }
+    };
+
+    initAuth();
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession ?? null);
+      setAuthReady(true);
+    });
+
+    return () => {
+      isMounted = false;
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  const handlePasswordLogin = async () => {
+    const email = authEmail.trim();
+    const password = authPassword;
+
+    if (!email || !password) {
+      showToast("Add meg az email címet és a jelszót", "error");
+      return;
+    }
+
+    setAuthSubmitting(true);
+
+    const { error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+
+    setAuthSubmitting(false);
+
+    if (error) {
+      showToast(`Belépési hiba: ${error.message}`, "error");
+      return;
+    }
+
+    setAuthPassword("");
+    showToast("Sikeres bejelentkezés", "success");
+  };
+
+  const handleSignOut = async () => {
+    const { error } = await supabase.auth.signOut();
+    if (error) {
+      showToast(`Kilépési hiba: ${error.message}`, "error");
+      return;
+    }
+    setHydrated(false);
+    showToast("Sikeres kilépés", "success");
+  };
+
+  useEffect(() => {
+    if (!authReady || !currentUser?.id) return;
+
+    const initializeApp = async () => {
+      const fallbackVehicles = safeRead(
+        scopedStorageKey(STORAGE_KEYS.vehicles),
+        initialVehicles
+      ).map(ensureVehicleHistory);
+
+      const savedOwners = safeRead(scopedStorageKey(STORAGE_KEYS.owners), initialOwnerOptions);
+      const savedEmail = safeRead(scopedStorageKey(STORAGE_KEYS.email), defaultEmailSettings);
+      const savedAck = safeRead(scopedStorageKey(STORAGE_KEYS.ack), {});
+      const savedDismissed = safeRead(scopedStorageKey(STORAGE_KEYS.dismissed), {});
+      const savedUi = safeRead(scopedStorageKey(STORAGE_KEYS.ui), {
         selectedId: fallbackVehicles[0]?.id ?? null,
         activePage: "szerviz",
         query: "",
@@ -839,9 +836,16 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
       let loadedVehicles = fallbackVehicles;
 
       try {
+        await Promise.all([
+          supabase.from("vehicles").update({ user_id: currentUser.id }).is("user_id", null),
+          supabase.from("service_history").update({ user_id: currentUser.id }).is("user_id", null),
+          supabase.from("km_logs").update({ user_id: currentUser.id }).is("user_id", null),
+        ]);
+
         const { data, error } = await supabase
           .from("vehicles")
           .select("*")
+          .eq("user_id", currentUser.id)
           .order("id", { ascending: false });
 
         if (error) {
@@ -851,11 +855,13 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
             supabase
               .from("service_history")
               .select("*")
+              .eq("user_id", currentUser.id)
               .order("entry_date", { ascending: false })
               .order("created_at", { ascending: false }),
             supabase
               .from("km_logs")
               .select("*")
+              .eq("user_id", currentUser.id)
               .order("entry_date", { ascending: false })
               .order("created_at", { ascending: false }),
           ]);
@@ -880,27 +886,14 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
         console.error("Vehicle initialization error:", err);
       }
 
-      const savedDocs = safeRead(STORAGE_KEYS.docs, createInitialDocsMap(loadedVehicles));
-
-      let loadedDocuments = savedDocs;
-
-      try {
-        const { rows: documentRows, error: documentsError } = await fetchVehicleDocumentRows();
-
-        if (documentsError) {
-          console.error("Supabase vehicle_documents load error:", documentsError);
-        } else if (Array.isArray(documentRows) && documentRows.length > 0) {
-          loadedDocuments = mapVehicleDocumentsRowsToMap(loadedVehicles, documentRows);
-        } else {
-          loadedDocuments = createInitialDocsMap(loadedVehicles);
-        }
-      } catch (err) {
-        console.error("Vehicle document initialization error:", err);
-      }
+      const savedDocs = safeRead(
+        scopedStorageKey(STORAGE_KEYS.docs),
+        createInitialDocsMap(loadedVehicles)
+      );
 
       setVehicles(loadedVehicles);
       setOwnerOptions(savedOwners);
-      setDocumentsByVehicle(loadedDocuments);
+      setDocumentsByVehicle(savedDocs);
       setEmailSettings(savedEmail);
       setAcknowledgedNotifications(savedAck);
       setDismissedNotifications(savedDismissed);
@@ -928,42 +921,42 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
     };
 
     initializeApp();
-  }, []);
+  }, [authReady, currentUser?.id]);
 
   useEffect(() => {
     if (!hydrated) return;
-    safeWrite(STORAGE_KEYS.vehicles, vehicles);
+    safeWrite(scopedStorageKey(STORAGE_KEYS.vehicles), vehicles);
   }, [vehicles, hydrated]);
 
   useEffect(() => {
     if (!hydrated) return;
-    safeWrite(STORAGE_KEYS.owners, ownerOptions);
+    safeWrite(scopedStorageKey(STORAGE_KEYS.owners), ownerOptions);
   }, [ownerOptions, hydrated]);
 
   useEffect(() => {
     if (!hydrated) return;
-    safeWrite(STORAGE_KEYS.docs, documentsByVehicle);
+    safeWrite(scopedStorageKey(STORAGE_KEYS.docs), documentsByVehicle);
   }, [documentsByVehicle, hydrated]);
 
   useEffect(() => {
     if (!hydrated) return;
-    safeWrite(STORAGE_KEYS.email, emailSettings);
+    safeWrite(scopedStorageKey(STORAGE_KEYS.email), emailSettings);
   }, [emailSettings, hydrated]);
 
   useEffect(() => {
     if (!hydrated) return;
-    safeWrite(STORAGE_KEYS.ack, acknowledgedNotifications);
+    safeWrite(scopedStorageKey(STORAGE_KEYS.ack), acknowledgedNotifications);
   }, [acknowledgedNotifications, hydrated]);
 
   useEffect(() => {
     if (!hydrated) return;
-    safeWrite(STORAGE_KEYS.dismissed, dismissedNotifications);
+    safeWrite(scopedStorageKey(STORAGE_KEYS.dismissed), dismissedNotifications);
   }, [dismissedNotifications, hydrated]);
 
   useEffect(() => {
     if (!hydrated) return;
 
-    safeWrite(STORAGE_KEYS.ui, {
+    safeWrite(scopedStorageKey(STORAGE_KEYS.ui), {
       selectedId,
       activePage,
       query,
@@ -1677,7 +1670,7 @@ const serviceDashboardYearlyCosts = useMemo(() => {
     fileInputRefs.current[refKey]?.click();
   };
 
-  const handleFileUpload = async (vehicleId, docKey, file) => {
+  const handleFileUpload = (vehicleId, docKey, file) => {
     if (!file) return;
 
     const allowedTypes = ["application/pdf", "image/jpeg", "image/png"];
@@ -1693,64 +1686,40 @@ const serviceDashboardYearlyCosts = useMemo(() => {
       return;
     }
 
-    const idKey = String(vehicleId);
-    const vehicleDocs = documentsByVehicle[idKey] || createDefaultVehicleDocs();
-    const currentDoc = vehicleDocs[docKey];
+    const reader = new FileReader();
+    reader.onload = () => {
+      const fileDataUrl = typeof reader.result === "string" ? reader.result : "";
 
-    const filePath = buildDocumentStoragePath(vehicleId, docKey, file.name);
+      setDocumentsByVehicle((prev) => {
+        const idKey = String(vehicleId);
+        const vehicleDocs = prev[idKey] || createDefaultVehicleDocs();
+        const doc = vehicleDocs[docKey];
 
-    const { error: uploadError } = await supabase.storage
-      .from(DOCUMENTS_BUCKET)
-      .upload(filePath, file, {
-        upsert: true,
-        contentType: file.type,
+        return {
+          ...prev,
+          [idKey]: {
+            ...vehicleDocs,
+            [docKey]: {
+              ...doc,
+              uploaded: true,
+              fileName: file.name,
+              fileType: file.type,
+              fileSize: file.size,
+              fileDataUrl,
+              uploadedAt: todayIso(),
+            },
+          },
+        };
       });
 
-    if (uploadError) {
-      showToast(`Feltöltési hiba: ${uploadError.message}`, "error");
-      return;
-    }
-
-    if (currentDoc?.filePath) {
-      await supabase.storage
-        .from(DOCUMENTS_BUCKET)
-        .remove([currentDoc.filePath]);
-    }
-
-    const fileUrl = getStoredDocumentUrl(filePath);
-
-    const nextDoc = {
-      ...currentDoc,
-      uploaded: true,
-      fileName: file.name,
-      fileType: file.type,
-      fileSize: file.size,
-      filePath,
-      fileUrl,
-      fileDataUrl: fileUrl,
-      uploadedAt: todayIso(),
+      showSaved("Dokumentum feltöltve");
     };
 
-    const { error: rowError } = await upsertVehicleDocumentRow({
-      vehicleId,
-      docKey,
-      doc: nextDoc,
-    });
+    reader.onerror = () => {
+      showToast("Nem sikerült beolvasni a fájlt", "error");
+    };
 
-    if (rowError) {
-      showToast(`Mentési hiba: ${rowError.message}`, "error");
-      return;
-    }
-
-    setDocumentsByVehicle((prev) => ({
-      ...prev,
-      [idKey]: {
-        ...(prev[idKey] || createDefaultVehicleDocs()),
-        [docKey]: nextDoc,
-      },
-    }));
-
-    showSaved("Dokumentum feltöltve");
+    reader.readAsDataURL(file);
   };
 
   const isPreviewableImage = (doc) => {
@@ -1813,35 +1782,27 @@ const serviceDashboardYearlyCosts = useMemo(() => {
   };
 
   const openStoredDocument = (doc) => {
-    const fileSource = doc?.fileUrl || doc?.fileDataUrl;
-    if (!fileSource) {
+    if (!doc?.fileDataUrl) {
       showToast("Ehhez a dokumentumhoz nincs megnyitható fájl", "error");
       return;
     }
 
-    const normalizedDoc = {
-      ...doc,
-      fileDataUrl: fileSource,
-      fileUrl: fileSource,
-    };
-
-    if (isPreviewablePdf(normalizedDoc)) {
-      openPdfInNewWindow(normalizedDoc);
+    if (isPreviewablePdf(doc)) {
+      openPdfInNewWindow(doc);
       return;
     }
 
-    setDocumentPreview(normalizedDoc);
+    setDocumentPreview(doc);
   };
 
   const downloadStoredDocument = (doc) => {
-    const fileSource = doc?.fileUrl || doc?.fileDataUrl;
-    if (!fileSource) {
+    if (!doc?.fileDataUrl) {
       showToast("Ehhez a dokumentumhoz nincs letölthető fájl", "error");
       return;
     }
 
     const link = document.createElement("a");
-    link.href = fileSource;
+    link.href = doc.fileDataUrl;
     link.download = doc.fileName || "dokumentum";
     document.body.appendChild(link);
     link.click();
@@ -2170,6 +2131,7 @@ const buildHealthCsvExport = () => {
   };
 
   const saveVehicleDetails = async () => {
+    if (!currentUser?.id) return;
     const resolvedOwner = resolveOwnerValue(
       vehicleDetailsForm.ownerMode,
       vehicleDetailsForm.customOwner
@@ -2207,6 +2169,7 @@ const buildHealthCsvExport = () => {
       .from("vehicles")
       .update(vehiclePayload)
       .eq("id", selectedId)
+      .eq("user_id", currentUser.id)
       .select();
 
     console.log("SUPABASE UPDATE DATA:", data);
@@ -2375,6 +2338,7 @@ const buildHealthCsvExport = () => {
   };
 
   const addServiceHistoryEntry = async () => {
+    if (!currentUser?.id) return;
     if (!selectedVehicle) return;
 
     const kmValue =
@@ -2417,6 +2381,7 @@ const buildHealthCsvExport = () => {
       .insert([
         {
           vehicle_id: selectedId,
+          user_id: currentUser.id,
           entry_date: serviceHistoryDraft.date,
           km: kmValue,
           service_type: resolvedServiceType,
@@ -2449,6 +2414,7 @@ const buildHealthCsvExport = () => {
         lastServiceKm: kmValue,
       })
       .eq("id", selectedId)
+      .eq("user_id", currentUser.id)
       .select();
 
     if (updateError) {
@@ -2496,6 +2462,7 @@ const buildHealthCsvExport = () => {
 
 
 const handleKmUpdate = async () => {
+  if (!currentUser?.id) return;
   if (!selectedVehicle) return;
 
   const kmValue = Number(kmUpdateDraft.km);
@@ -2519,6 +2486,7 @@ const handleKmUpdate = async () => {
     .insert([
       {
         vehicle_id: selectedId,
+        user_id: currentUser.id,
         entry_date: kmUpdateDraft.date,
         km: kmValue,
         note: kmUpdateDraft.note.trim(),
@@ -2545,6 +2513,7 @@ const handleKmUpdate = async () => {
       currentKm: kmValue,
     })
     .eq("id", selectedId)
+    .eq("user_id", currentUser.id)
     .select();
 
   if (updateError) {
@@ -2587,6 +2556,7 @@ const handleKmUpdate = async () => {
 };
 
   const removeServiceHistoryEntry = async (entryId) => {
+    if (!currentUser?.id) return;
     if (!selectedVehicle) return;
 
     const targetEntry = (Array.isArray(selectedVehicle.serviceHistory) ? selectedVehicle.serviceHistory : [])
@@ -2602,7 +2572,8 @@ const handleKmUpdate = async () => {
         .from("service_history")
         .delete()
         .eq("id", entryId)
-        .eq("vehicle_id", selectedId);
+        .eq("vehicle_id", selectedId)
+        .eq("user_id", currentUser.id);
 
       deleteError = error;
     } else if (targetEntry.type === "km-update") {
@@ -2610,7 +2581,8 @@ const handleKmUpdate = async () => {
         .from("km_logs")
         .delete()
         .eq("id", entryId)
-        .eq("vehicle_id", selectedId);
+        .eq("vehicle_id", selectedId)
+        .eq("user_id", currentUser.id);
 
       deleteError = error;
     }
@@ -2622,7 +2594,7 @@ const handleKmUpdate = async () => {
       return;
     }
 
-    const { serviceRows, kmRows, error: historyLoadError } = await fetchVehicleHistoryRows(selectedId);
+    const { serviceRows, kmRows, error: historyLoadError } = await fetchVehicleHistoryRows(selectedId, currentUser.id);
 
     if (historyLoadError) {
       showToast(`Törlés utáni betöltési hiba: ${historyLoadError.message}`, "error");
@@ -2654,6 +2626,7 @@ const handleKmUpdate = async () => {
         lastServiceKm: recalculatedState.lastServiceKm,
       })
       .eq("id", selectedId)
+      .eq("user_id", currentUser.id)
       .select();
 
     if (vehicleUpdateError) {
@@ -2728,6 +2701,7 @@ const handleKmUpdate = async () => {
   };
 
   const addVehicle = async () => {
+    if (!currentUser?.id) return;
     const resolvedOwner = resolveOwnerValue(form.ownerMode, form.customOwner);
 
     if (!form.name || !form.plate || !form.currentKm || !form.lastServiceKm) {
@@ -2755,6 +2729,7 @@ const handleKmUpdate = async () => {
       timingBeltIntervalKm:
         form.timingBeltIntervalKm === "" ? null : Number(form.timingBeltIntervalKm),
       archived: false,
+      user_id: currentUser.id,
     };
 
     const { data, error } = await supabase
@@ -2811,8 +2786,20 @@ const handleKmUpdate = async () => {
     showSaved("Új autó felvéve");
   };
 
-  const archiveSelectedVehicle = () => {
+  const archiveSelectedVehicle = async () => {
+    if (!currentUser?.id) return;
     if (!vehicleToArchive) return;
+
+    const { error } = await supabase
+      .from("vehicles")
+      .update({ archived: true })
+      .eq("id", vehicleToArchive.id)
+      .eq("user_id", currentUser.id);
+
+    if (error) {
+      showToast(`Archiválási hiba: ${error.message}`, "error");
+      return;
+    }
 
     setVehicles((prev) =>
       prev.map((vehicle) =>
@@ -2829,7 +2816,20 @@ const handleKmUpdate = async () => {
     showSaved("Jármű archiválva");
   };
 
-  const restoreVehicle = (vehicleId) => {
+  const restoreVehicle = async (vehicleId) => {
+    if (!currentUser?.id) return;
+
+    const { error } = await supabase
+      .from("vehicles")
+      .update({ archived: false })
+      .eq("id", vehicleId)
+      .eq("user_id", currentUser.id);
+
+    if (error) {
+      showToast(`Visszaállítási hiba: ${error.message}`, "error");
+      return;
+    }
+
     setVehicles((prev) =>
       prev.map((vehicle) =>
         vehicle.id === vehicleId
@@ -2846,6 +2846,7 @@ const handleKmUpdate = async () => {
   };
 
   const deleteVehiclePermanently = async () => {
+    if (!currentUser?.id) return;
     if (!vehicleToDelete) return;
 
     const vehicleId = vehicleToDelete.id;
@@ -2853,7 +2854,8 @@ const handleKmUpdate = async () => {
     const { error } = await supabase
       .from("vehicles")
       .delete()
-      .eq("id", vehicleId);
+      .eq("id", vehicleId)
+      .eq("user_id", currentUser.id);
 
     console.log("SUPABASE DELETE ERROR:", error);
 
@@ -2881,76 +2883,47 @@ const handleKmUpdate = async () => {
     showSaved("Jármű véglegesen törölve");
   };
 
-  const updateDocField = async (vehicleId, docKey, field, value) => {
-    const idKey = String(vehicleId);
-    const vehicleDocs = documentsByVehicle[idKey] || createDefaultVehicleDocs();
-    const currentDoc = vehicleDocs[docKey];
+  const updateDocField = (vehicleId, docKey, field, value) => {
+    setDocumentsByVehicle((prev) => {
+      const idKey = String(vehicleId);
+      const vehicleDocs = prev[idKey] || createDefaultVehicleDocs();
+      const doc = vehicleDocs[docKey];
 
-    const nextDoc = {
-      ...currentDoc,
-      [field]: value,
-    };
-
-    setDocumentsByVehicle((prev) => ({
-      ...prev,
-      [idKey]: {
-        ...(prev[idKey] || createDefaultVehicleDocs()),
-        [docKey]: nextDoc,
-      },
-    }));
-
-    const { error } = await upsertVehicleDocumentRow({
-      vehicleId,
-      docKey,
-      doc: nextDoc,
+      return {
+        ...prev,
+        [idKey]: {
+          ...vehicleDocs,
+          [docKey]: {
+            ...doc,
+            [field]: value,
+          },
+        },
+      };
     });
-
-    if (error) {
-      showToast(`Dokumentum mentési hiba: ${error.message}`, "error");
-    }
   };
 
-  const removeDocument = async (vehicleId, docKey) => {
-    const idKey = String(vehicleId);
-    const vehicleDocs = documentsByVehicle[idKey] || createDefaultVehicleDocs();
-    const currentDoc = vehicleDocs[docKey];
+  const removeDocument = (vehicleId, docKey) => {
+    setDocumentsByVehicle((prev) => {
+      const idKey = String(vehicleId);
+      const vehicleDocs = prev[idKey] || createDefaultVehicleDocs();
+      const doc = vehicleDocs[docKey];
 
-    if (currentDoc?.filePath) {
-      const { error: storageError } = await supabase.storage
-        .from(DOCUMENTS_BUCKET)
-        .remove([currentDoc.filePath]);
-
-      if (storageError) {
-        showToast(`Törlési hiba: ${storageError.message}`, "error");
-        return;
-      }
-    }
-
-    const { error: deleteRowError } = await supabase
-      .from("vehicle_documents")
-      .delete()
-      .eq("vehicle_id", vehicleId)
-      .eq("doc_key", docKey);
-
-    if (deleteRowError) {
-      showToast(`Törlési hiba: ${deleteRowError.message}`, "error");
-      return;
-    }
-
-    const fallbackDocs = createDefaultVehicleDocs();
-    const fallbackDoc = fallbackDocs[docKey];
-
-    setDocumentsByVehicle((prev) => ({
-      ...prev,
-      [idKey]: {
-        ...(prev[idKey] || createDefaultVehicleDocs()),
-        [docKey]: {
-          ...fallbackDoc,
-          expiry: currentDoc?.expiry || fallbackDoc?.expiry || "",
-          note: currentDoc?.note || "",
+      return {
+        ...prev,
+        [idKey]: {
+          ...vehicleDocs,
+          [docKey]: {
+            ...doc,
+            uploaded: false,
+            fileName: "",
+            fileType: "",
+            fileSize: 0,
+            fileDataUrl: "",
+            uploadedAt: "",
+          },
         },
-      },
-    }));
+      };
+    });
 
     showSaved("Dokumentum eltávolítva");
   };
@@ -2963,11 +2936,86 @@ const handleKmUpdate = async () => {
     });
   };
 
-  const confirmDocumentRemove = async () => {
+  const confirmDocumentRemove = () => {
     if (!documentToRemove) return;
-    await removeDocument(documentToRemove.vehicleId, documentToRemove.docKey);
+    removeDocument(documentToRemove.vehicleId, documentToRemove.docKey);
     setDocumentToRemove(null);
   };
+
+
+  if (!authReady) {
+    return (
+      <div className="min-h-screen text-slate-50">
+        <div className="mx-auto flex min-h-screen max-w-md items-center justify-center px-6">
+          <div className="fleet-card w-full rounded-3xl border border-white/10 bg-slate-950/70 p-8">
+            <div className="mb-3 text-sm uppercase tracking-[0.22em] text-cyan-200/80">Fleet login</div>
+            <h1 className="text-3xl font-bold text-white">Bejelentkezés</h1>
+            <p className="mt-3 text-sm text-slate-400">
+              Email és jelszó megadásával tudsz belépni a flottakezelőbe.
+            </p>
+            <div className="mt-6 space-y-3">
+              <Label>Email cím</Label>
+              <Input
+                type="email"
+                value={authEmail}
+                onChange={(e) => setAuthEmail(e.target.value)}
+                placeholder="pelda@email.hu"
+                className="fleet-input rounded-2xl"
+              />
+              <Label>Jelszó</Label>
+              <Input
+                type="password"
+                value={authPassword}
+                onChange={(e) => setAuthPassword(e.target.value)}
+                placeholder="Jelszó"
+                className="fleet-input rounded-2xl"
+              />
+              <Button className="w-full rounded-2xl" onClick={handlePasswordLogin} disabled={authSubmitting}>
+                {authSubmitting ? "Belépés..." : "Belépés"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!session) {
+    return (
+      <div className="min-h-screen text-slate-50">
+        <div className="mx-auto flex min-h-screen max-w-md items-center justify-center px-6">
+          <div className="fleet-card w-full rounded-3xl border border-white/10 bg-slate-950/70 p-8">
+            <div className="mb-3 text-sm uppercase tracking-[0.22em] text-cyan-200/80">Fleet login</div>
+            <h1 className="text-3xl font-bold text-white">Bejelentkezés</h1>
+            <p className="mt-3 text-sm text-slate-400">
+              Add meg az email címedet és a jelszavadat a belépéshez.
+            </p>
+            <div className="mt-6 space-y-3">
+              <Label>Email cím</Label>
+              <Input
+                type="email"
+                value={authEmail}
+                onChange={(e) => setAuthEmail(e.target.value)}
+                placeholder="pelda@email.hu"
+                className="fleet-input rounded-2xl"
+              />
+              <Label>Jelszó</Label>
+              <Input
+                type="password"
+                value={authPassword}
+                onChange={(e) => setAuthPassword(e.target.value)}
+                placeholder="Jelszó"
+                className="fleet-input rounded-2xl"
+              />
+              <Button className="w-full rounded-2xl" onClick={handlePasswordLogin} disabled={authSubmitting}>
+                {authSubmitting ? "Belépés..." : "Belépés"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (!hydrated) {
     return (
@@ -3134,6 +3182,11 @@ const handleKmUpdate = async () => {
             <Button variant="secondary" className="fleet-action-btn rounded-2xl" onClick={() => setExportOpen(true)}>
               <Download className="mr-2 h-4 w-4" />
               Export
+            </Button>
+
+            <Button variant="secondary" className="fleet-action-btn rounded-2xl" onClick={handleSignOut}>
+              <LogOut className="mr-2 h-4 w-4" />
+              Kilépés
             </Button>
 
             {activePage === "adatok" && (
@@ -4117,7 +4170,20 @@ const handleKmUpdate = async () => {
                         />
                       </div>
 
-
+                      <div className="space-y-2 md:col-span-2">
+                        <Label>Megjegyzés</Label>
+                        <Input
+                          value={vehicleDetailsForm.note}
+                          disabled={!isVehicleDetailsEditing}
+                          onChange={(e) =>
+                            setVehicleDetailsForm({
+                              ...vehicleDetailsForm,
+                              note: e.target.value,
+                            })
+                          }
+                          className={lockedInputClass}
+                        />
+                      </div>
                     </div>
 
                     <div className="grid gap-4 md:grid-cols-4">
