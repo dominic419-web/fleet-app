@@ -811,7 +811,7 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
     const initializeApp = async () => {
       const fallbackVehicles = safeRead(
         scopedStorageKey(STORAGE_KEYS.vehicles),
-        []
+        initialVehicles
       ).map(ensureVehicleHistory);
 
       const savedOwners = safeRead(scopedStorageKey(STORAGE_KEYS.owners), initialOwnerOptions);
