@@ -125,6 +125,12 @@ const normalizeServiceHistoryItem = (entry) => ({
       : Number(entry.cost),
   provider: entry?.provider || "",
   note: entry?.note || "",
+  baselineLastServiceKm:
+    entry?.baselineLastServiceKm === null ||
+    entry?.baselineLastServiceKm === undefined ||
+    Number.isNaN(Number(entry?.baselineLastServiceKm))
+      ? null
+      : Number(entry.baselineLastServiceKm),
   isServiceRecord: Boolean(entry?.isServiceRecord),
 });
 
@@ -216,12 +222,34 @@ const resolveServiceHistoryType = (draft) => {
 
 const getLatestServiceKmByType = (vehicle, serviceLabel) => {
   if (!vehicle) return Number(vehicle?.lastServiceKm || 0);
+
   const history = Array.isArray(vehicle.serviceHistory) ? vehicle.serviceHistory : [];
-  const record = [...history]
-    .map(normalizeServiceHistoryItem)
-    .filter((entry) => entry.isServiceRecord && entry.serviceType === serviceLabel && entry.km !== null && entry.km !== undefined)
-    .sort((a, b) => Number(b.km || 0) - Number(a.km || 0))[0];
-  return Number(record?.km ?? vehicle.lastServiceKm ?? 0);
+  const normalizedHistory = [...history].map(normalizeServiceHistoryItem);
+
+  const record = normalizedHistory
+    .filter(
+      (entry) =>
+        entry.isServiceRecord &&
+        entry.serviceType === serviceLabel &&
+        entry.km !== null &&
+        entry.km !== undefined
+    )
+    .sort((a, b) => {
+      const dateDiff = String(b.date || "").localeCompare(String(a.date || ""));
+      if (dateDiff !== 0) return dateDiff;
+      return Number(b.km || 0) - Number(a.km || 0);
+    })[0];
+
+  if (record) return Number(record.km || 0);
+
+  const baselineEntry = normalizedHistory.find(
+    (entry) =>
+      entry.type === "baseline" &&
+      entry.baselineLastServiceKm !== null &&
+      entry.baselineLastServiceKm !== undefined
+  );
+
+  return Number(baselineEntry?.baselineLastServiceKm ?? vehicle.lastServiceKm ?? 0);
 };
 
 const getCustomServiceCycleStatus = (vehicle, serviceLabel, intervalKm, warningWindowKm) => {
@@ -407,16 +435,17 @@ const ensureVehicleHistory = (vehicle) => {
   return {
     ...vehicle,
     serviceHistory: [
-      normalizeServiceHistoryItem(
-        createTimelineEntry({
+      normalizeServiceHistoryItem({
+        ...createTimelineEntry({
           type: "baseline",
           title: "Kiinduló állapot",
           detail: `${formatKmHu(vehicle?.currentKm || 0)} km aktuális futás, ${formatKmHu(
             vehicle?.lastServiceKm || 0
           )} km utolsó szerviz.`,
           km: vehicle?.currentKm || 0,
-        })
-      ),
+        }),
+        baselineLastServiceKm: Number(vehicle?.lastServiceKm || 0),
+      }),
     ],
   };
 };
@@ -591,10 +620,22 @@ const deriveVehicleKmStateFromHistory = (vehicle, historyEntries) => {
       return Number(b.km || 0) - Number(a.km || 0);
     })[0];
 
+  const baselineEntry = normalizedHistory.find(
+    (entry) =>
+      entry.type === "baseline" &&
+      entry.baselineLastServiceKm !== null &&
+      entry.baselineLastServiceKm !== undefined
+  );
+
   return {
     serviceHistory: normalizedHistory,
-    currentKm: latestKmEntry ? Number(latestKmEntry.km) : Number(vehicle?.currentKm || 0),
-    lastServiceKm: latestServiceEntry ? Number(latestServiceEntry.km) : 0,
+    currentKm: Number(latestKmEntry?.km ?? baselineEntry?.km ?? vehicle?.currentKm ?? 0),
+    lastServiceKm: Number(
+      latestServiceEntry?.km ??
+        baselineEntry?.baselineLastServiceKm ??
+        vehicle?.lastServiceKm ??
+        0
+    ),
   };
 };
 
