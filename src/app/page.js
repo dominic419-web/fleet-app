@@ -562,6 +562,42 @@ const buildDocsFromSupabaseRows = (vehicles, documentRows) => {
 };
 
 
+const sortHistoryEntriesDesc = (entries) =>
+  [...(Array.isArray(entries) ? entries : [])]
+    .map(normalizeServiceHistoryItem)
+    .sort((a, b) => {
+      const dateDiff = String(b.date || "").localeCompare(String(a.date || ""));
+      if (dateDiff !== 0) return dateDiff;
+      return Number(b.km || 0) - Number(a.km || 0);
+    });
+
+const deriveVehicleKmStateFromHistory = (vehicle, historyEntries) => {
+  const normalizedHistory = sortHistoryEntriesDesc(historyEntries);
+  const numericEntries = normalizedHistory.filter(
+    (entry) => entry.km !== null && entry.km !== undefined && Number.isFinite(Number(entry.km))
+  );
+
+  const latestKmEntry = [...numericEntries].sort((a, b) => {
+    const dateDiff = String(b.date || "").localeCompare(String(a.date || ""));
+    if (dateDiff !== 0) return dateDiff;
+    return Number(b.km || 0) - Number(a.km || 0);
+  })[0];
+
+  const latestServiceEntry = normalizedHistory
+    .filter((entry) => entry.isServiceRecord && entry.km !== null && entry.km !== undefined)
+    .sort((a, b) => {
+      const dateDiff = String(b.date || "").localeCompare(String(a.date || ""));
+      if (dateDiff !== 0) return dateDiff;
+      return Number(b.km || 0) - Number(a.km || 0);
+    })[0];
+
+  return {
+    serviceHistory: normalizedHistory,
+    currentKm: latestKmEntry ? Number(latestKmEntry.km) : Number(vehicle?.currentKm || 0),
+    lastServiceKm: latestServiceEntry ? Number(latestServiceEntry.km) : 0,
+  };
+};
+
 const buildPredictiveService = (vehicle) => {
   if (!vehicle) return null;
 
@@ -645,16 +681,16 @@ export default function Home() {
   const [authPassword, setAuthPassword] = useState("");
   const [authSubmitting, setAuthSubmitting] = useState(false);
 
-  const [vehicles, setVehicles] = useState(initialVehicles);
+  const [vehicles, setVehicles] = useState([]);
   const [ownerOptions, setOwnerOptions] = useState(initialOwnerOptions);
   const [documentsByVehicle, setDocumentsByVehicle] = useState(
-    createInitialDocsMap(initialVehicles)
+    {}
   );
   const [emailSettings, setEmailSettings] = useState(defaultEmailSettings);
   const [acknowledgedNotifications, setAcknowledgedNotifications] = useState({});
   const [dismissedNotifications, setDismissedNotifications] = useState({});
 
-  const [selectedId, setSelectedId] = useState(initialVehicles[0].id);
+  const [selectedId, setSelectedId] = useState(null);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
   const [open, setOpen] = useState(false);
@@ -938,18 +974,8 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
 
   useEffect(() => {
     if (!hydrated) return;
-    safeWrite(STORAGE_KEYS.vehicles, vehicles);
-  }, [vehicles, hydrated]);
-
-  useEffect(() => {
-    if (!hydrated) return;
     safeWrite(STORAGE_KEYS.owners, ownerOptions);
   }, [ownerOptions, hydrated]);
-
-  useEffect(() => {
-    if (!hydrated) return;
-    safeWrite(STORAGE_KEYS.docs, documentsByVehicle);
-  }, [documentsByVehicle, hydrated]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -2466,33 +2492,38 @@ const buildHealthCsvExport = () => {
       return;
     }
 
-    const newEntry = createServiceRecordEntry({
-      date: serviceHistoryDraft.date,
-      serviceType: resolvedServiceType,
-      km: kmValue,
-      cost: costValue,
-      provider: serviceHistoryDraft.provider.trim(),
-      note: serviceHistoryDraft.note.trim(),
-    });
-
     try {
-      const { error: serviceInsertError } = await supabase.from("service_history").insert({
-        user_id: session.user.id,
-        vehicle_id: selectedId,
-        entry_date: serviceHistoryDraft.date,
-        km: kmValue,
-        service_type: resolvedServiceType,
-        cost: costValue,
-        provider: serviceHistoryDraft.provider.trim(),
-        note: serviceHistoryDraft.note.trim(),
-        title: resolvedServiceType,
-      });
+      const { data: insertedServiceRows, error: serviceInsertError } = await supabase
+        .from("service_history")
+        .insert({
+          user_id: session.user.id,
+          vehicle_id: selectedId,
+          entry_date: serviceHistoryDraft.date,
+          km: kmValue,
+          service_type: resolvedServiceType,
+          cost: costValue,
+          provider: serviceHistoryDraft.provider.trim(),
+          note: serviceHistoryDraft.note.trim(),
+          title: resolvedServiceType,
+        })
+        .select("*")
+        .limit(1);
 
       if (serviceInsertError) {
         console.error("service_history insert error:", serializeSupabaseError(serviceInsertError), serviceInsertError);
         showToast("A szerviz bejegyzést nem sikerült menteni", "error");
         return;
       }
+
+      const insertedServiceRow = insertedServiceRows?.[0];
+      const newEntry = insertedServiceRow ? mapSupabaseServiceRow(insertedServiceRow) : createServiceRecordEntry({
+        date: serviceHistoryDraft.date,
+        serviceType: resolvedServiceType,
+        km: kmValue,
+        cost: costValue,
+        provider: serviceHistoryDraft.provider.trim(),
+        note: serviceHistoryDraft.note.trim(),
+      });
 
       const nextCurrentKm = Math.max(Number(selectedVehicle.currentKm || 0), kmValue);
 
@@ -2513,16 +2544,21 @@ const buildHealthCsvExport = () => {
       }
 
       setVehicles((prev) =>
-        prev.map((vehicle) =>
-          vehicle.id === selectedId
-            ? {
-                ...vehicle,
-                currentKm: nextCurrentKm,
-                lastServiceKm: kmValue,
-                serviceHistory: [newEntry, ...(Array.isArray(vehicle.serviceHistory) ? vehicle.serviceHistory : [])].slice(0, 50),
-              }
-            : vehicle
-        )
+        prev.map((vehicle) => {
+          if (vehicle.id !== selectedId) return vehicle;
+
+          const recalculated = deriveVehicleKmStateFromHistory(vehicle, [
+            newEntry,
+            ...(Array.isArray(vehicle.serviceHistory) ? vehicle.serviceHistory : []),
+          ]);
+
+          return {
+            ...vehicle,
+            currentKm: Math.max(Number(recalculated.currentKm || 0), nextCurrentKm),
+            lastServiceKm: Number(recalculated.lastServiceKm || kmValue),
+            serviceHistory: recalculated.serviceHistory,
+          };
+        })
       );
 
       setServiceDraft({
@@ -2558,26 +2594,31 @@ const handleKmUpdate = async () => {
     return;
   }
 
-  const newEntry = createKmUpdateEntry({
-    date: kmUpdateDraft.date,
-    km: kmValue,
-    note: kmUpdateDraft.note.trim(),
-  });
-
   try {
-    const { error: kmInsertError } = await supabase.from("km_logs").insert({
-      user_id: session.user.id,
-      vehicle_id: selectedId,
-      entry_date: kmUpdateDraft.date,
-      km: kmValue,
-      note: kmUpdateDraft.note.trim(),
-    });
+    const { data: insertedKmRows, error: kmInsertError } = await supabase
+      .from("km_logs")
+      .insert({
+        user_id: session.user.id,
+        vehicle_id: selectedId,
+        entry_date: kmUpdateDraft.date,
+        km: kmValue,
+        note: kmUpdateDraft.note.trim(),
+      })
+      .select("*")
+      .limit(1);
 
     if (kmInsertError) {
       console.error("km_logs insert error:", serializeSupabaseError(kmInsertError), kmInsertError);
       showToast("A km frissítést nem sikerült menteni", "error");
       return;
     }
+
+    const insertedKmRow = insertedKmRows?.[0];
+    const newEntry = insertedKmRow ? mapSupabaseKmRow(insertedKmRow) : createKmUpdateEntry({
+      date: kmUpdateDraft.date,
+      km: kmValue,
+      note: kmUpdateDraft.note.trim(),
+    });
 
     const { error: vehicleUpdateError } = await supabase
       .from("vehicles")
@@ -2595,15 +2636,21 @@ const handleKmUpdate = async () => {
     }
 
     setVehicles((prev) =>
-      prev.map((vehicle) =>
-        vehicle.id === selectedId
-          ? {
-              ...vehicle,
-              currentKm: kmValue,
-              serviceHistory: [newEntry, ...(Array.isArray(vehicle.serviceHistory) ? vehicle.serviceHistory : [])].slice(0, 50),
-            }
-          : vehicle
-      )
+      prev.map((vehicle) => {
+        if (vehicle.id !== selectedId) return vehicle;
+
+        const recalculated = deriveVehicleKmStateFromHistory(vehicle, [
+          newEntry,
+          ...(Array.isArray(vehicle.serviceHistory) ? vehicle.serviceHistory : []),
+        ]);
+
+        return {
+          ...vehicle,
+          currentKm: Number(recalculated.currentKm || kmValue),
+          lastServiceKm: Number(recalculated.lastServiceKm || vehicle.lastServiceKm || 0),
+          serviceHistory: recalculated.serviceHistory,
+        };
+      })
     );
 
     setServiceDraft((prev) => ({
@@ -2652,20 +2699,56 @@ const handleKmUpdate = async () => {
         return;
       }
 
+      const remainingHistory = (Array.isArray(selectedVehicle.serviceHistory) ? selectedVehicle.serviceHistory : [])
+        .map(normalizeServiceHistoryItem)
+        .filter((entry) => entry.id !== entryId);
+
+      const recalculated = deriveVehicleKmStateFromHistory(selectedVehicle, remainingHistory);
+
+      const { error: vehicleRecalcError } = await supabase
+        .from("vehicles")
+        .update({
+          currentKm: Number(recalculated.currentKm || 0),
+          lastServiceKm: Number(recalculated.lastServiceKm || 0),
+        })
+        .eq("id", selectedId)
+        .eq("user_id", session.user.id);
+
+      if (vehicleRecalcError) {
+        console.error("vehicles recalc after history delete error:", serializeSupabaseError(vehicleRecalcError), vehicleRecalcError);
+        showToast("A jármű km adatait nem sikerült újraszámolni", "error");
+        return;
+      }
+
       setVehicles((prev) =>
         prev.map((vehicle) =>
           vehicle.id === selectedId
             ? {
                 ...vehicle,
-                serviceHistory: (Array.isArray(vehicle.serviceHistory) ? vehicle.serviceHistory : []).filter(
-                  (entry) => entry.id !== entryId
-                ),
+                currentKm: Number(recalculated.currentKm || 0),
+                lastServiceKm: Number(recalculated.lastServiceKm || 0),
+                serviceHistory: recalculated.serviceHistory,
               }
             : vehicle
         )
       );
 
-      showSaved("Szerviz bejegyzés törölve");
+      setServiceDraft({
+        currentKm: String(Number(recalculated.currentKm || 0)),
+        lastServiceKm: String(Number(recalculated.lastServiceKm || 0)),
+      });
+
+      setServiceHistoryDraft((prev) => ({
+        ...prev,
+        km: String(Number(recalculated.currentKm || 0)),
+      }));
+
+      setKmUpdateDraft((prev) => ({
+        ...prev,
+        km: String(Number(recalculated.currentKm || 0)),
+      }));
+
+      showSaved("Bejegyzés törölve");
     } catch (error) {
       console.error("removeServiceHistoryEntry error:", error);
       showToast("Nem sikerült törölni a bejegyzést", "error");
@@ -4679,7 +4762,7 @@ const handleKmUpdate = async () => {
                             {selectedVehicleServiceSummary.lastService ? formatDateHu(selectedVehicleServiceSummary.lastService.date) : "—"}
                           </div>
                           <div className="mt-2 text-xs text-slate-500">
-                            {selectedVehicleServiceSummary.lastService?.serviceTypeLabel || "Nincs még bejegyzés"}
+                            {selectedVehicleServiceSummary.lastService?.serviceType || selectedVehicleServiceSummary.lastService?.title || "Nincs még bejegyzés"}
                           </div>
                         </div>
 
