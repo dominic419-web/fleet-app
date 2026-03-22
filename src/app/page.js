@@ -2443,71 +2443,7 @@ const buildHealthCsvExport = () => {
     setIsVehicleDetailsEditing(false);
   };
 
-  const saveServiceDraft = () => {
-    const currentKmValue = Number.isNaN(Number(serviceDraft.currentKm))
-      ? 0
-      : Number(serviceDraft.currentKm);
-    const lastServiceKmValue = Number.isNaN(Number(serviceDraft.lastServiceKm))
-      ? 0
-      : Number(serviceDraft.lastServiceKm);
 
-    setVehicles((prev) =>
-      prev.map((v) =>
-        v.id === selectedId
-          ? {
-              ...v,
-              currentKm: currentKmValue,
-              lastServiceKm: lastServiceKmValue,
-              serviceHistory: [
-                createTimelineEntry({
-                  type: "update",
-                  title: "Szerviz adatok frissítve",
-                  detail: `Aktuális: ${formatKmHu(currentKmValue)} km • Utolsó szerviz: ${formatKmHu(lastServiceKmValue)} km`,
-                  km: currentKmValue,
-                }),
-                ...(Array.isArray(v.serviceHistory) ? v.serviceHistory : []),
-              ].slice(0, 8),
-            }
-          : v
-      )
-    );
-
-    showSaved("Szerviz adatok mentve");
-  };
-
-  const registerServiceNow = () => {
-    const currentKmValue = Number.isNaN(Number(serviceDraft.currentKm))
-      ? 0
-      : Number(serviceDraft.currentKm);
-
-    setServiceDraft({
-      currentKm: String(currentKmValue),
-      lastServiceKm: String(currentKmValue),
-    });
-
-    setVehicles((prev) =>
-      prev.map((v) =>
-        v.id === selectedId
-          ? {
-              ...v,
-              currentKm: currentKmValue,
-              lastServiceKm: currentKmValue,
-              serviceHistory: [
-                createTimelineEntry({
-                  type: "service",
-                  title: "Szerviz rögzítve",
-                  detail: `Új ciklus indult ${formatKmHu(currentKmValue)} km állástól.`,
-                  km: currentKmValue,
-                }),
-                ...(Array.isArray(v.serviceHistory) ? v.serviceHistory : []),
-              ].slice(0, 8),
-            }
-          : v
-      )
-    );
-
-    showSaved("Szerviz rögzítve");
-  };
 
   const addServiceHistoryEntry = async () => {
     if (!selectedVehicle || !session?.user?.id) return;
