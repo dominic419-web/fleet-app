@@ -6401,7 +6401,7 @@ const handleKmUpdate = async () => {
             <DialogTitle>Végleges törlés</DialogTitle>
             <DialogDescription>
               Biztosan véglegesen törölni szeretné a <span className="font-semibold text-white">{vehicleToDelete?.name}</span>{" "}
-              járművet a rendszerből?
+              járművett a rendszerből?
             </DialogDescription>
           </DialogHeader>
 
