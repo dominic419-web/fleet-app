@@ -75,9 +75,10 @@ import ExportDialog from "@/components/fleet/ExportDialog";
 import { supabase } from "@/lib/supabase";
 import { ExpiryBadge, NotificationTypeBadge, StatusBadge } from "@/components/fleet/FleetBadges";
 import {
+  CUSTOM_DRIVER_VALUE,
   CUSTOM_OWNER_VALUE,
   STORAGE_KEYS,
-  initialOwnerOptions,
+  initialDriverOptions,
   initialVehicles,
   defaultEmailSettings,
   todayIso,
@@ -90,7 +91,8 @@ import {
   getExpiryStatus,
   formatDateHu,
   getOwnerModeAndCustom,
-  resolveOwnerValue,
+  getDriverModeAndCustom,
+  resolveDriverValue,
   getDocUploadStatus,
   severityRank,
   csvEscape,
@@ -419,13 +421,13 @@ const serializeSupabaseError = (error) => {
   }
 };
 
-const buildVehicleDbPayload = (formState, resolvedOwner, userId) => ({
+const buildVehicleDbPayload = (formState, resolvedDriver, userId) => ({
   user_id: userId,
   name: formState.name.trim(),
   plate: formState.plate.toUpperCase().trim(),
   currentKm: Number(formState.currentKm),
   lastServiceKm: Number(formState.lastServiceKm),
-  owner: resolvedOwner || "",
+  driver: resolvedDriver || "",
   note: formState.note || "",
   year: formState.year || null,
   vin: (formState.vin || "").toUpperCase(),
@@ -504,7 +506,7 @@ const mapSupabaseVehicleRow = (row) =>
     plate: row.plate || "",
     currentKm: Number(row.currentKm ?? row.current_km ?? row.mileage ?? 0),
     lastServiceKm: Number(row.lastServiceKm ?? row.last_service_km ?? row.mileage ?? 0),
-    owner: row.owner || "",
+    driver: row.driver || row.owner || "",
     note: row.note || "",
     year: row.year ? String(row.year) : "",
     vin: row.vin || "",
@@ -788,7 +790,7 @@ export default function Home() {
   const [authSubmitting, setAuthSubmitting] = useState(false);
 
   const [vehicles, setVehicles] = useState([]);
-  const [ownerOptions, setOwnerOptions] = useState(initialOwnerOptions);
+  const [ownerOptions, setOwnerOptions] = useState(initialDriverOptions);
   const [documentsByVehicle, setDocumentsByVehicle] = useState(
     {}
   );
@@ -975,7 +977,10 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
     if (!authReady || !session?.user?.id) return;
 
     const initializeApp = async () => {
-      const savedOwners = safeRead(STORAGE_KEYS.owners, initialOwnerOptions);
+      const savedOwners = safeRead(
+        STORAGE_KEYS.drivers,
+        safeRead(STORAGE_KEYS.owners, initialDriverOptions)
+      );
       const savedEmail = safeRead(STORAGE_KEYS.email, defaultEmailSettings);
       const savedAck = safeRead(STORAGE_KEYS.ack, {});
       const savedDismissed = safeRead(STORAGE_KEYS.dismissed, {});
@@ -1139,7 +1144,7 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
 
   const filteredVehicles = useMemo(() => {
     return enrichedVehicles.filter((v) => {
-      const matchesQuery = [v.name, v.plate, v.owner, v.note]
+      const matchesQuery = [v.name, v.plate, v.driver, v.note]
         .join(" ")
         .toLowerCase()
         .includes(query.toLowerCase());
@@ -1342,15 +1347,15 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
         });
       }
 
-      if (!vehicle.owner || !vehicle.owner.trim()) {
+      if (!vehicle.driver || !vehicle.driver.trim()) {
         items.push({
-          id: `owner-missing-${vehicle.id}`,
-          category: "owner",
-          type: "ownerMissing",
+          id: `driver-missing-${vehicle.id}`,
+          category: "driver",
+          type: "driverMissing",
           status: "late",
           vehicleId: vehicle.id,
-          title: `${vehicle.name} tulajdonosa nincs beállítva`,
-          description: `${vehicle.plate} • Állíts be tulajdonost az autóhoz.`,
+          title: `${vehicle.name} sofőrje nincs beállítva`,
+          description: `${vehicle.plate} • Állíts be sofőrt az autóhoz.`,
         });
       }
 
@@ -1621,7 +1626,7 @@ const serviceDashboardYearlyCosts = useMemo(() => {
 
     const legalNotifications = allNotifications.filter((item) => item.category === "legal");
     const docNotifications = allNotifications.filter((item) => item.category === "docs");
-    const ownerNotifications = allNotifications.filter((item) => item.category === "owner");
+    const ownerNotifications = allNotifications.filter((item) => item.category === "driver");
 
     const topVehicle = serviceDashboardDueVehicles[0] || null;
 
@@ -1677,7 +1682,7 @@ const serviceDashboardYearlyCosts = useMemo(() => {
   useEffect(() => {
     if (!selectedVehicle) return;
 
-    const ownerState = getOwnerModeAndCustom(selectedVehicle.owner, ownerOptions);
+    const ownerState = getOwnerModeAndCustom(selectedVehicle.driver, ownerOptions);
 
     setVehicleDetailsForm({
       name: selectedVehicle.name || "",
@@ -2181,7 +2186,7 @@ const computeVehicleHealthIndex = (vehicle) => {
   else if (inspectionStatus.status === "warning") score -= 8;
 
   score -= missingDocs * 6;
-  if (!vehicle.owner) score -= 8;
+  if (!vehicle.driver) score -= 8;
 
   const serviceRecords = (Array.isArray(vehicle.serviceHistory) ? vehicle.serviceHistory : [])
     .map(normalizeServiceHistoryItem)
@@ -2216,7 +2221,7 @@ const computeVehicleHealthIndex = (vehicle) => {
       [
         "Név",
         "Rendszám",
-        "Tulajdonos",
+        "Sofőr",
         "Évjárat",
         "Alvázszám",
         "Üzemanyag",
@@ -2235,7 +2240,7 @@ const computeVehicleHealthIndex = (vehicle) => {
         return [
           vehicle.name,
           vehicle.plate,
-          vehicle.owner || "",
+          vehicle.driver || "",
           vehicle.year || "",
           vehicle.vin || "",
           vehicle.fuelType || "",
@@ -2354,7 +2359,7 @@ const buildHealthCsvExport = () => {
   const rows = [[
     "Jármű neve",
     "Rendszám",
-    "Tulajdonos",
+    "Sofőr",
     "Állapotindex",
     "Olajcsere státusz",
     "Vezérlés státusz",
@@ -2390,7 +2395,7 @@ const buildHealthCsvExport = () => {
     rows.push([
       vehicle.name,
       vehicle.plate,
-      vehicle.owner || "",
+      vehicle.driver || "",
       computeVehicleHealthIndex(vehicle),
       oilStatus?.status || "nincs",
       timingStatus?.status || "nincs",
@@ -2480,7 +2485,7 @@ const buildHealthCsvExport = () => {
     const vehiclePayload = {
       name: vehicleDetailsForm.name.trim(),
       plate: vehicleDetailsForm.plate.toUpperCase().trim(),
-      owner: resolvedOwner,
+      driver: resolvedOwner,
       note: vehicleDetailsForm.note || "",
       year: vehicleDetailsForm.year || null,
       vin: (vehicleDetailsForm.vin || "").toUpperCase(),
@@ -2546,7 +2551,7 @@ const buildHealthCsvExport = () => {
                 ...v,
                 name: vehicleDetailsForm.name.trim(),
                 plate: vehicleDetailsForm.plate.toUpperCase().trim(),
-                owner: resolvedOwner,
+                driver: resolvedOwner,
                 note: vehicleDetailsForm.note,
                 year: vehicleDetailsForm.year,
                 vin: vehicleDetailsForm.vin.toUpperCase(),
@@ -2596,7 +2601,7 @@ const buildHealthCsvExport = () => {
   const startVehicleDetailsEditing = () => {
     if (!selectedVehicle) return;
 
-    const ownerState = getOwnerModeAndCustom(selectedVehicle.owner, ownerOptions);
+    const ownerState = getOwnerModeAndCustom(selectedVehicle.driver, ownerOptions);
 
     setVehicleDetailsForm({
       name: selectedVehicle.name || "",
@@ -2625,7 +2630,7 @@ const buildHealthCsvExport = () => {
   const cancelVehicleDetailsEditing = () => {
     if (!selectedVehicle) return;
 
-    const ownerState = getOwnerModeAndCustom(selectedVehicle.owner, ownerOptions);
+    const ownerState = getOwnerModeAndCustom(selectedVehicle.driver, ownerOptions);
 
     setVehicleDetailsForm({
       name: selectedVehicle.name || "",
@@ -2948,7 +2953,7 @@ const handleKmUpdate = async () => {
 
     setOwnerOptions((prev) => [...prev, value]);
     setOwnerManagerValue("");
-    showSaved("Tulajdonos hozzáadva");
+    showSaved("Sofőr hozzáadva");
   };
 
   const deleteOwner = () => {
@@ -2958,17 +2963,17 @@ const handleKmUpdate = async () => {
 
     setVehicles((prev) =>
       prev.map((vehicle) =>
-        vehicle.owner === ownerToDelete
+        vehicle.driver === ownerToDelete
           ? {
               ...vehicle,
-              owner: "",
+              driver: "",
             }
           : vehicle
       )
     );
 
     setOwnerToDelete(null);
-    showSaved("Tulajdonos törölve");
+    showSaved("Sofőr törölve");
   };
 
   const addVehicle = async () => {
@@ -3051,7 +3056,7 @@ const handleKmUpdate = async () => {
 
       const hydratedInsertedRow = {
         ...insertedRow,
-        owner: insertedRow?.owner ?? resolvedOwner,
+      driver: insertedRow?.driver ?? insertedRow?.owner ?? resolvedOwner,
         note: insertedRow?.note ?? (form.note || ""),
         year: insertedRow?.year ?? (form.year || null),
         vin: insertedRow?.vin ?? ((form.vin || "").toUpperCase()),
@@ -3641,23 +3646,22 @@ const handleKmUpdate = async () => {
             </h1>
 
             <p className="mt-3 max-w-2xl text-sm text-slate-400 md:text-base">
-              Letisztult, gyors, tulajdonosbarát kezelőfelület járművekhez,
+              Letisztult, gyors, sofőrbarát kezelőfelület járművekhez,
               kilométerálláshoz, dokumentumokhoz és szerviz esedékességhez.
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
             <div className="relative" ref={notificationRef}>
+              {unreadNotificationsCount > 0 && (
+                <span className="pointer-events-none absolute -left-2 -top-2 z-10 flex h-6 min-w-[24px] items-center justify-center rounded-full bg-red-600 px-1 text-xs font-bold text-white">
+                  {unreadNotificationsCount}
+                </span>
+              )}
               <Button
-                variant="secondary"
-                className="fleet-action-btn relative rounded-2xl"
+                className="fleet-primary-btn rounded-2xl"
                 onClick={() => setNotificationOpen((prev) => !prev)}
               >
-                {unreadNotificationsCount > 0 && (
-                  <span className="absolute -left-2 -top-2 flex h-6 min-w-[24px] items-center justify-center rounded-full bg-red-600 px-1 text-xs font-bold text-white">
-                    {unreadNotificationsCount}
-                  </span>
-                )}
                 <Bell className="mr-2 h-4 w-4" />
                 Értesítések
               </Button>
@@ -3683,7 +3687,7 @@ const handleKmUpdate = async () => {
                         <SelectItem value="service">Szerviz</SelectItem>
                         <SelectItem value="legal">Okmány / lejárat</SelectItem>
                         <SelectItem value="docs">Dokumentumok</SelectItem>
-                        <SelectItem value="owner">Tulajdonos</SelectItem>
+                        <SelectItem value="driver">Sofőr</SelectItem>
                       </SelectContent>
                     </Select>
 
@@ -3751,14 +3755,9 @@ const handleKmUpdate = async () => {
               )}
             </div>
 
-            <Button variant="secondary" className="fleet-action-btn rounded-2xl" onClick={() => setExportOpen(true)}>
+            <Button className="fleet-primary-btn rounded-2xl" onClick={() => setExportOpen(true)}>
               <Download className="mr-2 h-4 w-4" />
               Export
-            </Button>
-
-            <Button variant="secondary" className="fleet-action-btn rounded-2xl" onClick={handleSignOut}>
-              <X className="mr-2 h-4 w-4" />
-              Kilépés
             </Button>
 
             {safePage === "vehicles" && (
@@ -3767,6 +3766,11 @@ const handleKmUpdate = async () => {
                 Új autó
               </Button>
             )}
+
+            <Button className="fleet-primary-btn rounded-2xl" onClick={handleSignOut}>
+              <X className="mr-2 h-4 w-4" />
+              Kilépés
+            </Button>
           </div>
         </motion.div>
 
@@ -4115,11 +4119,11 @@ const handleKmUpdate = async () => {
                   </div>
 
                   <div className="rounded-3xl border border-cyan-400/20 bg-cyan-500/8 p-4">
-                    <div className="mb-2 text-xs uppercase tracking-[0.22em] text-cyan-200/80">Dokumentum / tulaj</div>
+                    <div className="mb-2 text-xs uppercase tracking-[0.22em] text-cyan-200/80">Dokumentum / sofőr</div>
                     <div className="text-3xl font-bold text-white">
                       {prioritySummary.docsCount + prioritySummary.ownerCount}
                     </div>
-                    <div className="mt-2 text-sm text-slate-300">Hiányzó dokumentum vagy tulajdonos beállítás.</div>
+                    <div className="mt-2 text-sm text-slate-300">Hiányzó dokumentum vagy sofőr beállítás.</div>
                   </div>
                 </div>
 
@@ -4133,7 +4137,7 @@ const handleKmUpdate = async () => {
                     <>
                       <div className="text-2xl font-bold text-white">{prioritySummary.topVehicle.name}</div>
                       <div className="mt-1 text-sm text-slate-400">
-                        {prioritySummary.topVehicle.plate} • {prioritySummary.topVehicle.owner || "Nincs tulajdonos"} • {prioritySummary.topVehicle.dueType}
+                        {prioritySummary.topVehicle.plate} • {prioritySummary.topVehicle.driver || "Nincs sofőr"} • {prioritySummary.topVehicle.dueType}
                       </div>
 
                       <div className="mt-4 grid gap-3 text-sm text-slate-300">
@@ -4222,8 +4226,8 @@ const handleKmUpdate = async () => {
                           </span>
                         </div>
                         <div className="flex items-center justify-between">
-                          <span className="text-slate-400">Tulajdonos</span>
-                          <span className="text-slate-200">{vehicle.owner || "Nincs tulajdonos"}</span>
+                          <span className="text-slate-400">Sofőr</span>
+                          <span className="text-slate-200">{vehicle.driver || "Nincs sofőr"}</span>
                         </div>
                       </div>
 
@@ -4327,9 +4331,9 @@ const handleKmUpdate = async () => {
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2">
                     <UserPlus className="h-5 w-5" />
-                    Tulajdonosok kezelése
+                    Sofőrök kezelése
                   </CardTitle>
-                  <CardDescription>Előre rögzített tulajdonosok hozzáadása és törlése</CardDescription>
+                  <CardDescription>Előre rögzített sofőrök hozzáadása és törlése</CardDescription>
                 </CardHeader>
 
                 <CardContent className="space-y-5">
@@ -4337,7 +4341,7 @@ const handleKmUpdate = async () => {
                     <Input
                       value={ownerManagerValue}
                       onChange={(e) => setOwnerManagerValue(e.target.value)}
-                      placeholder="Új tulajdonos neve"
+                      placeholder="Új sofőr neve"
                       className="fleet-input rounded-2xl"
                     />
                     <Button className="rounded-2xl" onClick={addOwnerOption}>
@@ -4355,7 +4359,7 @@ const handleKmUpdate = async () => {
                         <button
                           onClick={() => setOwnerToDelete(owner)}
                           className="rounded-full border border-white/10 bg-white/5 p-2 text-slate-200 transition hover:bg-white/10"
-                          title="Tulajdonos törlése"
+                          title="Sofőr törlése"
                         >
                           <Trash2 className="h-4 w-4" />
                         </button>
@@ -4364,7 +4368,7 @@ const handleKmUpdate = async () => {
 
                     {ownerOptions.length === 0 && (
                       <div className="rounded-2xl border border-white/10 bg-slate-900/60 px-4 py-3 text-sm text-slate-400">
-                        Nincs még rögzített tulajdonos.
+                        Nincs még rögzített sofőr.
                       </div>
                     )}
                   </div>
@@ -4422,7 +4426,7 @@ const handleKmUpdate = async () => {
                       ["serviceAlerts", "Szerviz riasztások"],
                       ["legalAlerts", "Biztosítás / műszaki"],
                       ["docsAlerts", "Dokumentum riasztások"],
-                      ["ownerAlerts", "Tulajdonos hiányzik"],
+                      ["driverAlerts", "Sofőr hiányzik"],
                     ].map(([key, label]) => (
                       <button
                         key={key}
@@ -4576,7 +4580,7 @@ const handleKmUpdate = async () => {
                       </div>
 
                       <div className="space-y-2">
-                        <Label>Tulajdonos</Label>
+                        <Label>Sofőr</Label>
                         <Select
                           value={vehicleDetailsForm.ownerMode}
                           onValueChange={(value) =>
@@ -4619,7 +4623,7 @@ const handleKmUpdate = async () => {
 
                       {vehicleDetailsForm.ownerMode === CUSTOM_OWNER_VALUE && (
                         <div className="space-y-2 md:col-span-2">
-                          <Label>Egyéb tulajdonos</Label>
+                          <Label>Egyéb sofőr</Label>
                           <Input
                             value={vehicleDetailsForm.customOwner}
                             disabled={!isVehicleDetailsEditing}
@@ -4629,7 +4633,7 @@ const handleKmUpdate = async () => {
                                 customOwner: e.target.value,
                               })
                             }
-                            placeholder="Tulajdonos neve kézzel"
+                            placeholder="Sofőr neve kézzel"
                             className={lockedInputClass}
                           />
                         </div>
@@ -4782,9 +4786,9 @@ const handleKmUpdate = async () => {
 
                       <Card className="fleet-soft-card rounded-3xl">
                         <CardContent className="p-5">
-                          <div className="mb-2 text-sm text-slate-400">Tulajdonos</div>
+                          <div className="mb-2 text-sm text-slate-400">Sofőr</div>
                           <div className="text-lg font-bold text-white">
-                            {selectedVehicle.owner || "Nincs beállítva"}
+                            {selectedVehicle.driver || "Nincs beállítva"}
                           </div>
                         </CardContent>
                       </Card>
@@ -5003,7 +5007,7 @@ const handleKmUpdate = async () => {
                         <div>
                           <CardTitle className="text-2xl">Szerviz history</CardTitle>
                           <CardDescription>
-                            {selectedVehicle.name} · {selectedVehicle.plate} · {selectedVehicle.owner || "Nincs tulajdonos"}
+                            {selectedVehicle.name} · {selectedVehicle.plate} · {selectedVehicle.driver || "Nincs sofőr"}
                           </CardDescription>
                         </div>
 
@@ -6195,7 +6199,7 @@ const handleKmUpdate = async () => {
             </div>
 
             <div className="space-y-2">
-              <Label>Tulajdonos</Label>
+              <Label>Sofőr</Label>
               <Select
                 value={form.ownerMode}
                 onValueChange={(value) =>
@@ -6230,7 +6234,7 @@ const handleKmUpdate = async () => {
 
             {form.ownerMode === CUSTOM_OWNER_VALUE && (
               <div className="space-y-2 md:col-span-2">
-                <Label>Egyéb tulajdonos</Label>
+                <Label>Egyéb sofőr</Label>
                 <Input
                   value={form.customOwner}
                   onChange={(e) => setForm({ ...form, customOwner: e.target.value })}
@@ -6352,10 +6356,10 @@ const handleKmUpdate = async () => {
       <Dialog open={!!ownerToDelete} onOpenChange={() => setOwnerToDelete(null)}>
         <DialogContent className="fleet-dialog sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Tulajdonos törlése</DialogTitle>
+            <DialogTitle>Sofőr törlése</DialogTitle>
             <DialogDescription>
               Biztosan törölni szeretné az <span className="font-semibold text-white">{ownerToDelete}</span>{" "}
-              tulajdonost a rendszerből?
+              sofőrt a rendszerből?
             </DialogDescription>
           </DialogHeader>
 

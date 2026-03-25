@@ -1,10 +1,13 @@
 export const SERVICE_INTERVAL = 20000;
 export const EXPIRY_WARNING_DAYS = 30;
-export const CUSTOM_OWNER_VALUE = "__custom__";
+export const CUSTOM_DRIVER_VALUE = "__custom__";
+// Backwards-compat alias (older UI/state used "owner").
+export const CUSTOM_OWNER_VALUE = CUSTOM_DRIVER_VALUE;
 
 export const STORAGE_KEYS = {
   vehicles: "fleet_vehicles_v4",
-  owners: "fleet_owners_v4",
+  owners: "fleet_owners_v4", // legacy
+  drivers: "fleet_drivers_v1",
   docs: "fleet_docs_v4",
   email: "fleet_email_v4",
   ack: "fleet_ack_v4",
@@ -12,7 +15,9 @@ export const STORAGE_KEYS = {
   ui: "fleet_ui_v1",
 };
 
-export const initialOwnerOptions = ["Tulaj 1", "Tulaj 2", "Tulaj 3", "Tulaj 4"];
+export const initialDriverOptions = ["Sofőr 1", "Sofőr 2", "Sofőr 3", "Sofőr 4"];
+// Backwards-compat alias.
+export const initialOwnerOptions = initialDriverOptions;
 
 export const initialVehicles = [
   {
@@ -21,7 +26,7 @@ export const initialVehicles = [
     plate: "ABC-123",
     currentKm: 125000,
     lastServiceKm: 110000,
-    owner: "Tulaj 1",
+    driver: "Sofőr 1",
     note: "Futár autó",
     year: "2020",
     vin: "WF0XXXTTGXLA12345",
@@ -36,7 +41,7 @@ export const initialVehicles = [
     plate: "DEF-456",
     currentKm: 84300,
     lastServiceKm: 70000,
-    owner: "Tulaj 2",
+    driver: "Sofőr 2",
     note: "Értékesítés",
     year: "2021",
     vin: "TMBJR7NX5MY456789",
@@ -51,7 +56,7 @@ export const initialVehicles = [
     plate: "GHI-789",
     currentKm: 50120,
     lastServiceKm: 40000,
-    owner: "Tulaj 3",
+    driver: "Sofőr 3",
     note: "Irodai használat",
     year: "2019",
     vin: "SB1K93BE20E987654",
@@ -66,7 +71,7 @@ export const initialVehicles = [
     plate: "JKL-321",
     currentKm: 198500,
     lastServiceKm: 176000,
-    owner: "Tulaj 4",
+    driver: "Sofőr 4",
     note: "Hosszú utak",
     year: "2018",
     vin: "WV1ZZZSYZJ9012345",
@@ -82,7 +87,7 @@ export const defaultEmailSettings = {
   recipients: "",
   serviceAlerts: true,
   legalAlerts: true,
-  ownerAlerts: true,
+  driverAlerts: true,
   docsAlerts: true,
 };
 
@@ -237,25 +242,38 @@ export function formatDateHu(dateString) {
   return date.toLocaleDateString("hu-HU");
 }
 
-export function getOwnerModeAndCustom(owner, ownerOptions) {
-  if (owner && ownerOptions.includes(owner)) {
+export function getDriverModeAndCustom(driver, driverOptions) {
+  if (driver && driverOptions.includes(driver)) {
     return {
-      ownerMode: owner,
-      customOwner: "",
+      driverMode: driver,
+      customDriver: "",
     };
   }
 
   return {
-    ownerMode: CUSTOM_OWNER_VALUE,
-    customOwner: owner || "",
+    driverMode: CUSTOM_DRIVER_VALUE,
+    customDriver: driver || "",
+  };
+}
+
+export function resolveDriverValue(driverMode, customDriver) {
+  if (driverMode === CUSTOM_DRIVER_VALUE) {
+    return customDriver.trim();
+  }
+  return driverMode.trim();
+}
+
+// Backwards-compat function aliases (older imports).
+export function getOwnerModeAndCustom(owner, ownerOptions) {
+  const next = getDriverModeAndCustom(owner, ownerOptions);
+  return {
+    ownerMode: next.driverMode,
+    customOwner: next.customDriver,
   };
 }
 
 export function resolveOwnerValue(ownerMode, customOwner) {
-  if (ownerMode === CUSTOM_OWNER_VALUE) {
-    return customOwner.trim();
-  }
-  return ownerMode.trim();
+  return resolveDriverValue(ownerMode, customOwner);
 }
 
 export function getDocUploadStatus(doc) {

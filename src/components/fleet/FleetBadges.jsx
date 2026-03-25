@@ -56,7 +56,8 @@ export function NotificationTypeBadge({ type }) {
     insuranceLate: "Biztosítás",
     inspectionWarning: "Műszaki",
     inspectionLate: "Műszaki",
-    ownerMissing: "Tulajdonos",
+    ownerMissing: "Sofőr",
+    driverMissing: "Sofőr",
     docMissing: "Dokumentum",
     docLate: "Dokumentum",
     docWarning: "Dokumentum",
@@ -67,6 +68,7 @@ export function NotificationTypeBadge({ type }) {
     type === "insuranceLate" ||
     type === "inspectionLate" ||
     type === "ownerMissing" ||
+    type === "driverMissing" ||
     type === "docLate";
 
   if (destructive) {
