@@ -93,6 +93,7 @@ import {
   getOwnerModeAndCustom,
   getDriverModeAndCustom,
   resolveDriverValue,
+  resolveOwnerValue,
   getDocUploadStatus,
   severityRank,
   csvEscape,
@@ -680,7 +681,15 @@ const deriveVehicleKmStateFromHistory = (vehicle, historyEntries) => {
   })[0];
 
   const latestServiceEntry = normalizedHistory
-    .filter((entry) => entry.isServiceRecord && entry.km !== null && entry.km !== undefined)
+    // "Általános szerviz" should not affect oil/timing replacement baselines.
+    // Only oil-change and timing records should update the "lastServiceKm" fallback.
+    .filter(
+      (entry) =>
+        entry.isServiceRecord &&
+        entry.km !== null &&
+        entry.km !== undefined &&
+        (entry.serviceType === OIL_SERVICE_LABEL || entry.serviceType === TIMING_SERVICE_LABEL)
+    )
     .sort((a, b) => {
       const dateDiff = String(b.date || "").localeCompare(String(a.date || ""));
       if (dateDiff !== 0) return dateDiff;
@@ -2874,6 +2883,13 @@ const handleKmUpdate = async () => {
     }
 
     try {
+      // "Kiinduló állapot" is a derived baseline (not stored in Supabase tables).
+      // It should remain visible and counted, so we disallow deletion.
+      if (entryToRemove.type === "baseline") {
+        showToast("A kiinduló állapot nem törölhető", "error");
+        return;
+      }
+
       const targetTable = entryToRemove.isServiceRecord ? "service_history" : "km_logs";
       const { error } = await supabase
         .from(targetTable)
@@ -5361,14 +5377,16 @@ const handleKmUpdate = async () => {
                                       </div>
                                     ) : null}
 
-                                    <Button
-                                      variant="secondary"
-                                      className="rounded-2xl"
-                                      onClick={() => removeServiceHistoryEntry(entry.id)}
-                                    >
-                                      <Trash2 className="mr-2 h-4 w-4" />
-                                      Törlés
-                                    </Button>
+                                    {entry.type === "baseline" ? null : (
+                                      <Button
+                                        variant="secondary"
+                                        className="rounded-2xl"
+                                        onClick={() => removeServiceHistoryEntry(entry.id)}
+                                      >
+                                        <Trash2 className="mr-2 h-4 w-4" />
+                                        Törlés
+                                      </Button>
+                                    )}
                                   </div>
                                 </div>
                               </div>
