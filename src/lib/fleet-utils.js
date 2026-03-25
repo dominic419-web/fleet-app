@@ -259,36 +259,65 @@ export function resolveOwnerValue(ownerMode, customOwner) {
 }
 
 export function getDocUploadStatus(doc) {
-  if (!doc || !doc.uploaded) {
+  const docs = Array.isArray(doc) ? doc : [doc];
+  const uploadedDocs = docs.filter((d) => d && d.uploaded);
+
+  if (uploadedDocs.length === 0) {
     return {
       status: "missing",
       label: "Hiányzik",
       helper: "Nincs feltöltve",
+      sourceExpiry: "",
     };
   }
 
-  if (doc.expiry) {
-    const expiry = getExpiryStatus(doc.expiry);
-    if (expiry.status === "late") {
-      return {
-        status: "late",
-        label: "Lejárt",
-        helper: expiry.helper,
-      };
-    }
-    if (expiry.status === "warning") {
-      return {
-        status: "warning",
-        label: "Közeleg",
-        helper: expiry.helper,
-      };
-    }
+  const evaluated = uploadedDocs
+    .filter((d) => d.expiry)
+    .map((d) => ({ doc: d, expiryStatus: getExpiryStatus(d.expiry) }));
+
+  const lateDocs = evaluated.filter((e) => e.expiryStatus.status === "late");
+  if (lateDocs.length > 0) {
+    // Pick the most overdue one.
+    const picked = lateDocs.sort((a, b) => {
+      // More negative "days" => larger absolute lateness.
+      const aDays = getDaysUntil(a.doc.expiry) ?? 0;
+      const bDays = getDaysUntil(b.doc.expiry) ?? 0;
+      return aDays - bDays; // e.g. -50 < -10 => -50 - (-10) = -40 (a first)
+    })[0];
+    return {
+      status: "late",
+      label: "Lejárt",
+      helper: picked.expiryStatus.helper,
+      sourceExpiry: picked.doc.expiry,
+    };
   }
+
+  const warningDocs = evaluated.filter((e) => e.expiryStatus.status === "warning");
+  if (warningDocs.length > 0) {
+    // Pick the soonest expiring one.
+    const picked = warningDocs.sort((a, b) => {
+      const aDays = getDaysUntil(a.doc.expiry) ?? 999999;
+      const bDays = getDaysUntil(b.doc.expiry) ?? 999999;
+      return aDays - bDays;
+    })[0];
+    return {
+      status: "warning",
+      label: "Közeleg",
+      helper: picked.expiryStatus.helper,
+      sourceExpiry: picked.doc.expiry,
+    };
+  }
+
+  // Everything is ok: show helper from the most recently uploaded file if available.
+  const latest = [...uploadedDocs].sort((a, b) =>
+    String(b.uploadedAt || "").localeCompare(String(a.uploadedAt || ""))
+  )[0];
 
   return {
     status: "ok",
     label: "Feltöltve",
-    helper: doc.uploadedAt ? `Feltöltve: ${formatDateHu(doc.uploadedAt)}` : "Feltöltve",
+    helper: latest?.uploadedAt ? `Feltöltve: ${formatDateHu(latest.uploadedAt)}` : "Feltöltve",
+    sourceExpiry: latest?.expiry || "",
   };
 }
 
