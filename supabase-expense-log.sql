@@ -27,6 +27,7 @@ create table if not exists public.expense_entries (
   vat_amount numeric(12,2) null,
   vat_rate numeric(5,2) null,
   invoice_number text null,
+  note text null,
 
   payment_method text null,
   payment_card_last4 text null,
@@ -46,6 +47,20 @@ create table if not exists public.expense_entries (
   created_by_auth_user_id uuid not null default auth.uid(),
   updated_at timestamptz not null default now()
 );
+
+-- Backward compatible: add note column if table already existed
+do $$
+begin
+  if not exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'expense_entries'
+      and column_name = 'note'
+  ) then
+    alter table public.expense_entries add column note text null;
+  end if;
+end $$;
 
 create table if not exists public.expense_ai_jobs (
   id bigserial primary key,
