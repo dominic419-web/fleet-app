@@ -1,6 +1,8 @@
 export const SERVICE_CYCLE_KM = 20000;
 export const WARNING_THRESHOLD_KM = 3000;
 export const DOCUMENT_STORAGE_BUCKET = "vehicle-documents";
+/** Private bucket for fuel / expense receipt images + AI pipeline (must exist in Supabase Storage). */
+export const EXPENSE_RECEIPTS_STORAGE_BUCKET = "expense-receipts";
 
 export const OIL_SERVICE_LABEL = "Olajcsere";
 export const TIMING_SERVICE_LABEL = "Vezérlés csere";

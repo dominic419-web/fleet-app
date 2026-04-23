@@ -80,7 +80,15 @@ import {
 import ExportDialog from "@/components/fleet/ExportDialog";
 import DriverView from "@/components/fleet/DriverView";
 import JourneyLogPdf from "@/components/fleet/JourneyLogPdf";
-import { supabase } from "@/lib/supabase";
+import { supabase, isSupabaseRefreshTokenBrokenError } from "@/lib/supabase";
+import {
+  driverOutboxCount,
+  enqueueDriverOutboxItem,
+  getDueDriverOutboxItems,
+  markDriverOutboxItemFailed,
+  readDriverOutbox,
+  removeDriverOutboxItem,
+} from "@/lib/fleet/driver-outbox";
 import { ExpiryBadge, NotificationTypeBadge, StatusBadge } from "@/components/fleet/FleetBadges";
 import {
   CUSTOM_DRIVER_VALUE,
@@ -112,6 +120,7 @@ import {
   SERVICE_CYCLE_KM,
   WARNING_THRESHOLD_KM,
   DOCUMENT_STORAGE_BUCKET,
+  EXPENSE_RECEIPTS_STORAGE_BUCKET,
   OIL_SERVICE_LABEL,
   TIMING_SERVICE_LABEL,
   GENERAL_SERVICE_LABEL,
@@ -156,6 +165,9 @@ import {
 } from "@/lib/fleet/vehicle-analytics";
 import {
   serializeSupabaseError,
+  isSupabaseStorageBucketNotFoundError,
+  expenseReceiptBucketMissingUserHint,
+  formatProcessExpenseReceiptHttpFailure,
   buildVehicleDbPayload,
   mapDriverFromRow,
   mapSupabaseVehicleRow,
@@ -188,12 +200,29 @@ export default function FleetHome() {
   const [acknowledgedNotifications, setAcknowledgedNotifications] = useState({});
   const [dismissedNotifications, setDismissedNotifications] = useState({});
 
+  const [companyMemberships, setCompanyMemberships] = useState([]);
+  const [companySwitching, setCompanySwitching] = useState(false);
+  const currentCompanyId = useMemo(() => {
+    const v = session?.user?.app_metadata?.company_id;
+    return v != null && String(v).trim() !== "" ? String(v).trim() : null;
+  }, [session?.user?.app_metadata?.company_id]);
+  const tenantUserId = currentCompanyId; // phase-1: company id == legacy tenant user_id
+  const currentCompanyRole = useMemo(() => {
+    const m = companyMemberships.find((it) => String(it.company_id) === String(currentCompanyId));
+    return m?.role || "";
+  }, [companyMemberships, currentCompanyId]);
+
   const [selectedId, setSelectedId] = useState(null);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
   const [open, setOpen] = useState(false);
   const [activePage, setActivePage] = useState("home");
   const [isVehicleDetailsEditing, setIsVehicleDetailsEditing] = useState(false);
+
+  const [driverSearch, setDriverSearch] = useState("");
+  const [driverStatusFilter, setDriverStatusFilter] = useState("all"); // all | active | inactive
+  const [partnerSearch, setPartnerSearch] = useState("");
+  const [partnerStatusFilter, setPartnerStatusFilter] = useState("all"); // all | active | inactive
 
   const [ownerManagerValue, setOwnerManagerValue] = useState("");
   const [ownerToDelete, setOwnerToDelete] = useState(null);
@@ -202,6 +231,7 @@ export default function FleetHome() {
   const [documentToRemove, setDocumentToRemove] = useState(null);
 
   const [documentPreview, setDocumentPreview] = useState(null);
+  const [documentPreviewZoom, setDocumentPreviewZoom] = useState(1);
 
   const [driverDialogOpen, setDriverDialogOpen] = useState(false);
   const [driverEditing, setDriverEditing] = useState(null);
@@ -262,6 +292,11 @@ export default function FleetHome() {
   const [driverExpenseSaving, setDriverExpenseSaving] = useState(false);
   const [driverExpenseReceiptFile, setDriverExpenseReceiptFile] = useState(null);
   const [driverExpenseAiFile, setDriverExpenseAiFile] = useState(null);
+  const [driverExpenseAiProvider, setDriverExpenseAiProvider] = useState(() => {
+    if (typeof window === "undefined") return "auto";
+    const v = String(window.localStorage.getItem("fleet_expense_ai_provider") || "").toLowerCase().trim();
+    return v === "openai" || v === "gemini" || v === "auto" ? v : "auto";
+  });
   const [driverExpenseAiSaving, setDriverExpenseAiSaving] = useState(false);
   const [driverExpenseDraftOpen, setDriverExpenseDraftOpen] = useState(false);
   const [driverExpenseDraftEntry, setDriverExpenseDraftEntry] = useState(null);
@@ -291,6 +326,214 @@ export default function FleetHome() {
       driverVehicles.find((v) => String(v.id) === String(selectedDriverVehicleId)) ?? null
     );
   }, [driverVehicles, selectedDriverVehicleId]);
+
+  const [driverOutboxProcessing, setDriverOutboxProcessing] = useState(false);
+  const [driverOutboxCountState, setDriverOutboxCountState] = useState(0);
+  const driverRequestLocksRef = useRef({});
+
+  const initialsFromName = (name) => {
+    const parts = String(name || "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+    if (parts.length === 0) return "—";
+    const first = parts[0]?.[0] || "";
+    const last = (parts.length > 1 ? parts[parts.length - 1]?.[0] : parts[0]?.[1]) || "";
+    return `${first}${last}`.toUpperCase();
+  };
+
+  const refreshDriverOutboxCount = () => {
+    setDriverOutboxCountState(driverOutboxCount());
+  };
+
+  const driverDraftStorageKey = (kind, vehicleId) => `fleet_driver_${kind}_v1:${String(vehicleId || "")}`;
+
+  const readDriverDraft = (kind, vehicleId, fallback) => {
+    if (typeof window === "undefined") return fallback;
+    try {
+      const raw = window.localStorage.getItem(driverDraftStorageKey(kind, vehicleId));
+      if (!raw) return fallback;
+      const parsed = JSON.parse(raw);
+      return parsed ?? fallback;
+    } catch {
+      return fallback;
+    }
+  };
+
+  const writeDriverDraft = (kind, vehicleId, value) => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(driverDraftStorageKey(kind, vehicleId), JSON.stringify(value ?? null));
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const clearDriverDraft = (kind, vehicleId) => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.removeItem(driverDraftStorageKey(kind, vehicleId));
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const isNetworkishErrorMessage = (msg) => {
+    const t = String(msg || "").toLowerCase();
+    if (!t) return false;
+    return (
+      t.includes("failed to fetch") ||
+      t.includes("fetch") && t.includes("failed") ||
+      t.includes("network") ||
+      t.includes("networkerror") ||
+      t.includes("the internet connection appears to be offline") ||
+      t.includes("functionsfetcherror")
+    );
+  };
+
+  const shouldQueueDueToConnectivity = (errorLike) => {
+    if (typeof navigator !== "undefined" && navigator && navigator.onLine === false) return true;
+    return isNetworkishErrorMessage(serializeSupabaseError(errorLike));
+  };
+
+  useEffect(() => {
+    refreshDriverOutboxCount();
+    const tick = () => refreshDriverOutboxCount();
+    const id = window.setInterval(tick, 3000);
+    const onOnline = () => tick();
+    const onStorage = (e) => {
+      if (!e || e.key === "fleet_driver_outbox_v1") tick();
+    };
+    window.addEventListener("online", onOnline);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.clearInterval(id);
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, []);
+
+  // Restore per-vehicle drafts after refresh / crash.
+  useEffect(() => {
+    if (!isDriver) return;
+    if (!selectedDriverVehicleId) return;
+    const vehicleId = selectedDriverVehicleId;
+
+    const storedKm = readDriverDraft("kmDraft", vehicleId, "");
+    if (typeof storedKm === "string") {
+      setDriverKmDraft(storedKm);
+    }
+
+    const storedJourney = readDriverDraft("journeyDraft", vehicleId, null);
+    if (storedJourney && typeof storedJourney === "object") {
+      setDriverJourneyDraft((prev) => ({
+        ...prev,
+        tripType: storedJourney.tripType === "private" ? "private" : "business",
+        startLocation: storedJourney.startLocation ?? "",
+        startKm: storedJourney.startKm ?? "",
+        endLocation: storedJourney.endLocation ?? "",
+        endKm: storedJourney.endKm ?? "",
+      }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDriver, selectedDriverVehicleId]);
+
+  // Persist drafts while editing.
+  useEffect(() => {
+    if (!isDriver) return;
+    if (!selectedDriverVehicleId) return;
+    writeDriverDraft("kmDraft", selectedDriverVehicleId, String(driverKmDraft ?? ""));
+  }, [driverKmDraft, isDriver, selectedDriverVehicleId]);
+
+  useEffect(() => {
+    if (!isDriver) return;
+    if (!selectedDriverVehicleId) return;
+    writeDriverDraft("journeyDraft", selectedDriverVehicleId, driverJourneyDraft || {});
+  }, [driverJourneyDraft, isDriver, selectedDriverVehicleId]);
+
+  const processDriverOutboxOnce = async () => {
+    if (driverOutboxProcessing) return;
+    if (!session?.user?.id || !currentDriver?.id) return;
+    if (typeof navigator !== "undefined" && navigator.onLine === false) return;
+
+    const due = getDueDriverOutboxItems({ limit: 4 });
+    if (due.length === 0) return;
+
+    setDriverOutboxProcessing(true);
+    try {
+      for (const item of due) {
+        const id = item?.id;
+        const type = String(item?.type || "");
+        const payload = item?.payload || null;
+        if (!id || !type) {
+          if (id) removeDriverOutboxItem(id);
+          continue;
+        }
+
+        try {
+          if (type === "km_save") {
+            const vehicleId = payload?.vehicleId;
+            const newKm = payload?.newKm;
+            const note = payload?.note || "";
+            if (!vehicleId || newKm == null) {
+              removeDriverOutboxItem(id);
+              continue;
+            }
+            const res = await persistDriverOdometerReading({ vehicleId, newKm, note });
+            if (!res?.ok) {
+              throw res?.error || new Error("km_save failed");
+            }
+            removeDriverOutboxItem(id);
+            continue;
+          }
+
+          if (type === "expense_save") {
+            const p = payload?.insertPayload;
+            if (!p || !p.vehicle_id || !p.driver_id || !p.user_id) {
+              removeDriverOutboxItem(id);
+              continue;
+            }
+            const { data, error } = await supabase.from("expense_entries").insert(p).select("*").limit(1);
+            if (error) throw error;
+            const inserted = data?.[0];
+            if (inserted?.id) {
+              setDriverExpensesByVehicle((prev) => {
+                const key = String(inserted.vehicle_id);
+                const current = Array.isArray(prev?.[key]) ? prev[key] : [];
+                return { ...prev, [key]: [inserted, ...current].slice(0, 120) };
+              });
+            }
+            removeDriverOutboxItem(id);
+            continue;
+          }
+
+          // Unknown type: drop it.
+          removeDriverOutboxItem(id);
+        } catch (err) {
+          if (!shouldQueueDueToConnectivity(err)) {
+            // Non-network-ish: keep it but back off; user can see it pending and retry manually.
+            markDriverOutboxItemFailed(id, serializeSupabaseError(err));
+          } else {
+            markDriverOutboxItemFailed(id, serializeSupabaseError(err));
+          }
+        }
+      }
+    } finally {
+      setDriverOutboxProcessing(false);
+      refreshDriverOutboxCount();
+    }
+  };
+
+  useEffect(() => {
+    if (!isDriver) return;
+    if (driverOutboxProcessing) return;
+    if (driverOutboxCountState <= 0) return;
+    if (typeof navigator !== "undefined" && navigator.onLine === false) return;
+    const id = window.setInterval(() => {
+      processDriverOutboxOnce();
+    }, 5000);
+    return () => window.clearInterval(id);
+  }, [driverOutboxCountState, driverOutboxProcessing, isDriver, session?.user?.id, currentDriver?.id]);
 
   const selectedDriverActiveJourney = useMemo(() => {
     if (!selectedDriverVehicle?.id) return null;
@@ -347,6 +590,19 @@ export default function FleetHome() {
     tripType: "business",
     note: "",
   });
+  const [journeyAddOpen, setJourneyAddOpen] = useState(false);
+  const [journeyAddForm, setJourneyAddForm] = useState({
+    vehicleId: "all",
+    driverId: "all",
+    startedAt: "",
+    endedAt: "",
+    startKm: "",
+    endKm: "",
+    startLocation: "",
+    endLocation: "",
+    tripType: "business",
+    note: "",
+  });
 
   const [expenseEntries, setExpenseEntries] = useState([]);
   const [expenseLoading, setExpenseLoading] = useState(false);
@@ -354,6 +610,58 @@ export default function FleetHome() {
   const [expenseVehicleFilter, setExpenseVehicleFilter] = useState("all");
   const [expenseDriverFilter, setExpenseDriverFilter] = useState("all");
   const [expenseTypeFilter, setExpenseTypeFilter] = useState("all");
+  const [expenseAddOpen, setExpenseAddOpen] = useState(false);
+  const [expenseAddMode, setExpenseAddMode] = useState("manual"); // manual | ai
+  const [expenseAddSaving, setExpenseAddSaving] = useState(false);
+  const [expenseAddFile, setExpenseAddFile] = useState(null); // AI receipt file
+  const [expenseAddReceiptFile, setExpenseAddReceiptFile] = useState(null); // manual receipt file
+  const [expenseAddAiProvider, setExpenseAddAiProvider] = useState(() => {
+    if (typeof window === "undefined") return "auto";
+    const v = String(window.localStorage.getItem("fleet_expense_ai_provider") || "").toLowerCase().trim();
+    return v === "openai" || v === "gemini" || v === "auto" ? v : "auto";
+  });
+  const [expenseAddForm, setExpenseAddForm] = useState({
+    vehicleId: "all",
+    driverId: "all",
+    expenseType: "fuel",
+    occurredAt: todayIso(),
+    stationName: "",
+    stationLocation: "",
+    odometerKm: "",
+    fuelType: "",
+    liters: "",
+    unitPrice: "",
+    grossAmount: "",
+    currency: "HUF",
+    paymentMethod: "",
+    paymentCardLast4: "",
+    note: "",
+  });
+  const [expenseEditOpen, setExpenseEditOpen] = useState(false);
+  const [expenseEditing, setExpenseEditing] = useState(null);
+  const [expenseEditForm, setExpenseEditForm] = useState({
+    occurredAt: "",
+    expenseType: "fuel",
+    stationName: "",
+    stationLocation: "",
+    odometerKm: "",
+    currency: "HUF",
+    grossAmount: "",
+    netAmount: "",
+    vatAmount: "",
+    vatRate: "",
+    invoiceNumber: "",
+    paymentMethod: "",
+    paymentCardLast4: "",
+    fuelType: "",
+    liters: "",
+    unitPrice: "",
+    status: "posted",
+    note: "",
+  });
+
+  const [adminDeleteDialog, setAdminDeleteDialog] = useState(null);
+  const [adminDeleteSaving, setAdminDeleteSaving] = useState(false);
 
   const notificationRef = useRef(null);
   const fileInputRefs = useRef({});
@@ -366,11 +674,19 @@ export default function FleetHome() {
     contacts: true,
   });
 
+  const [vehicleLifecycleFilter, setVehicleLifecycleFilter] = useState("all"); // all | active | service | inactive | archived
+  const [vehicleModalOpen, setVehicleModalOpen] = useState(false);
+  const [vehicleImageUploading, setVehicleImageUploading] = useState(false);
+  const [vehicleShowAllFields, setVehicleShowAllFields] = useState(false);
+
   const [form, setForm] = useState({
+    brand: "",
+    model: "",
     name: "",
     plate: "",
     currentKm: "",
     lastServiceKm: "",
+    status: "active",
     ownerMode: "Tulaj 1",
     customOwner: "",
     driverId: "",
@@ -384,9 +700,189 @@ export default function FleetHome() {
     timingBeltIntervalKm: "180000",
   });
 
+  const [registrationFrontFile, setRegistrationFrontFile] = useState(null);
+  const [registrationBackFile, setRegistrationBackFile] = useState(null);
+  const [registrationAiProvider, setRegistrationAiProvider] = useState(() => {
+    if (typeof window === "undefined") return "auto";
+    const v = String(window.localStorage.getItem("fleet_registration_ai_provider") || "").toLowerCase().trim();
+    return v === "openai" || v === "gemini" || v === "auto" ? v : "auto";
+  });
+  const [registrationAiSaving, setRegistrationAiSaving] = useState(false);
+  const [registrationFrontStoragePath, setRegistrationFrontStoragePath] = useState("");
+  const [registrationBackStoragePath, setRegistrationBackStoragePath] = useState("");
+  const [registrationAiExpiry, setRegistrationAiExpiry] = useState("");
+
+  const runRegistrationAiPrefill = async () => {
+    if (!session?.user?.id) {
+      showToast("Be kell jelentkezned", "error");
+      return;
+    }
+    if (currentCompanyRole !== "admin") {
+      showToast("Csak admin futtathat AI kitöltést autó hozzáadásnál", "error");
+      return;
+    }
+    if (!currentCompanyId) {
+      showToast("Hiányzó cég kontextus (company_id)", "error");
+      return;
+    }
+    if (!registrationFrontFile || !registrationBackFile) {
+      showToast("Töltsd fel a forgalmi elöl és hátul képét", "error");
+      return;
+    }
+
+    const allowedTypes = ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"];
+    const maxBytes = 8 * 1024 * 1024;
+      const files = [registrationFrontFile, registrationBackFile];
+    for (const f of files) {
+      if (f.size > maxBytes) {
+        showToast("A kép túl nagy (max 8 MB)", "error");
+        return;
+      }
+      if (f.type && !allowedTypes.includes(f.type)) {
+        showToast("Csak JPG, PNG vagy WEBP tölthető fel", "error");
+        return;
+      }
+    }
+
+    setRegistrationAiSaving(true);
+    try {
+      const safeFrontName = sanitizeStorageSegment(registrationFrontFile.name || "forgalmi-elol.jpg");
+      const safeBackName = sanitizeStorageSegment(registrationBackFile.name || "forgalmi-hatul.jpg");
+      const frontPath = `${currentCompanyId}/vehicle_registration/pending/${Date.now()}-front-${safeFrontName}`;
+      const backPath = `${currentCompanyId}/vehicle_registration/pending/${Date.now()}-back-${safeBackName}`;
+
+      const [frontUpload, backUpload] = await Promise.all([
+        supabase.storage.from(DOCUMENT_STORAGE_BUCKET).upload(frontPath, registrationFrontFile, {
+          cacheControl: "3600",
+          upsert: false,
+          contentType: registrationFrontFile.type || undefined,
+        }),
+        supabase.storage.from(DOCUMENT_STORAGE_BUCKET).upload(backPath, registrationBackFile, {
+          cacheControl: "3600",
+          upsert: false,
+          contentType: registrationBackFile.type || undefined,
+        }),
+      ]);
+
+      if (frontUpload?.error) {
+        console.error("vehicle-documents registration front upload:", serializeSupabaseError(frontUpload.error), frontUpload.error);
+        showToast("A forgalmi (elöl) feltöltése nem sikerült", "error");
+        return;
+      }
+      if (backUpload?.error) {
+        console.error("vehicle-documents registration back upload:", serializeSupabaseError(backUpload.error), backUpload.error);
+        // best-effort cleanup
+        try {
+          await supabase.storage.from(DOCUMENT_STORAGE_BUCKET).remove([frontPath]);
+        } catch {
+          /* ignore */
+        }
+        showToast("A forgalmi (hátul) feltöltése nem sikerült", "error");
+        return;
+      }
+
+      setRegistrationFrontStoragePath(frontPath);
+      setRegistrationBackStoragePath(backPath);
+
+      const { data: sessWrap } = await supabase.auth.getSession();
+      const accessToken = sessWrap?.session?.access_token || session?.access_token;
+      if (!accessToken) {
+        showToast("Bejelentkezés lejárt. Jelentkezz be újra.", "error");
+        return;
+      }
+
+      const hint =
+        registrationAiProvider === "openai" || registrationAiProvider === "gemini" || registrationAiProvider === "auto"
+          ? registrationAiProvider
+          : "auto";
+      const fnUrl = `/api/fleet/process-registration-card?ai_provider=${encodeURIComponent(hint)}`;
+      const fnRes = await fetch(fnUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({
+          front_storage_path: frontPath,
+          back_storage_path: backPath,
+          vehicle_id: null,
+          ai_provider: hint,
+        }),
+      });
+
+      const fnText = await fnRes.text();
+      let fnData = null;
+      try {
+        fnData = fnText ? JSON.parse(fnText) : null;
+      } catch {
+        fnData = null;
+      }
+
+      if (!fnRes.ok) {
+        const detail =
+          typeof fnData?.detail === "string"
+            ? fnData.detail
+            : typeof fnData?.error === "string"
+              ? fnData.error
+              : "";
+
+        if (fnRes.status === 404) {
+          showToast(
+            detail ||
+              "AI feldolgozás HTTP 404: a végpont nem elérhető. Ellenőrizd, hogy a Next.js app újra lett-e indítva / redeploy-olva, és hogy a Supabase Edge Function `process-registration-card` telepítve van (supabase functions deploy process-registration-card).",
+            "error",
+          );
+          return;
+        }
+
+        showToast(detail || `AI feldolgozás HTTP ${fnRes.status}`, "error");
+        return;
+      }
+
+      const extracted = fnData?.extracted || null;
+      if (!extracted || typeof extracted !== "object") {
+        showToast("AI feldolgozás kész, de nem jött vissza értelmezhető adat.", "error");
+        return;
+      }
+
+      const nextPlate = String(extracted.plate || "").trim();
+      const nextVin = String(extracted.vin || "").trim();
+      const nextBrand = String(extracted.brand || "").trim();
+      const nextModel = String(extracted.model || "").trim();
+      const nextYear = String(extracted.year || "").trim();
+      const nextFuel = String(extracted.fuelType || "").trim();
+      const nextExpiry = String(extracted.registrationExpiry || "").trim();
+
+      setForm((prev) => ({
+        ...prev,
+        plate: prev.plate ? prev.plate : nextPlate || prev.plate,
+        vin: prev.vin ? prev.vin : nextVin || prev.vin,
+        brand: prev.brand ? prev.brand : nextBrand || prev.brand,
+        model: prev.model ? prev.model : nextModel || prev.model,
+        year: prev.year ? prev.year : nextYear || prev.year,
+        fuelType:
+          prev.fuelType && prev.fuelType !== "Benzin"
+            ? prev.fuelType
+            : nextFuel || prev.fuelType,
+      }));
+
+      if (nextExpiry) {
+        setRegistrationAiExpiry(nextExpiry);
+      }
+
+      showSaved("AI kitöltés kész");
+    } catch (e) {
+      console.error("runRegistrationAiPrefill error:", e);
+      showToast("AI feldolgozás nem sikerült", "error");
+    } finally {
+      setRegistrationAiSaving(false);
+    }
+  };
+
   const [vehicleDetailsForm, setVehicleDetailsForm] = useState({
+    brand: "",
+    model: "",
     name: "",
     plate: "",
+    status: "active",
+    imagePath: "",
     ownerMode: "Tulaj 1",
     customOwner: "",
     driverId: "",
@@ -423,6 +919,13 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
   note: "",
 });
 
+  useEffect(() => {
+    // Reset zoom when opening a new preview.
+    if (documentPreview) {
+      setDocumentPreviewZoom(1);
+    }
+  }, [documentPreview]);
+
 
   useEffect(() => {
     let isMounted = true;
@@ -452,15 +955,18 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
 
     const initializeAuth = async () => {
       try {
-        const { data, error } = await supabase.auth.getSession();
+        let data = null;
+        let error = null;
+        try {
+          const res = await supabase.auth.getSession();
+          data = res.data;
+          error = res.error;
+        } catch (e) {
+          error = e;
+        }
 
         if (error) {
-          const authMessage = String(error.message || "").toLowerCase();
-          if (
-            authMessage.includes("refresh token") ||
-            authMessage.includes("invalid") ||
-            authMessage.includes("jwt")
-          ) {
+          if (isSupabaseRefreshTokenBrokenError(error)) {
             await resetBrokenAuthState();
           } else {
             console.error("Supabase getSession error:", error);
@@ -469,13 +975,21 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
         } else if (isMounted) {
           const nextSession = data?.session ?? null;
           setSession(nextSession);
+          if (nextSession?.user?.id) {
+            // Load memberships early so we can bootstrap company context if needed.
+            void loadCompanyMemberships(nextSession);
+          }
           if (!nextSession) {
             setHydrated(true);
           }
         }
       } catch (error) {
-        console.error("Supabase auth init error:", error);
-        if (isMounted) setSession(null);
+        if (isSupabaseRefreshTokenBrokenError(error)) {
+          await resetBrokenAuthState();
+        } else {
+          console.error("Supabase auth init error:", error);
+          if (isMounted) setSession(null);
+        }
       } finally {
         if (isMounted) setAuthReady(true);
       }
@@ -539,6 +1053,9 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
       }
 
       setSession(nextSession ?? null);
+      if (nextSession?.user?.id) {
+        void loadCompanyMemberships(nextSession);
+      }
       if (!nextSession) {
         setHydrated(true);
       }
@@ -554,6 +1071,7 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
 
   useEffect(() => {
     if (!authReady || !session?.user?.id) return;
+    if (!currentCompanyId) return;
 
     const initializeApp = async () => {
       const savedOwners = safeRead(
@@ -603,6 +1121,9 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
       try {
         setInitializationError("");
         const userId = session.user.id;
+        await loadCompanyMemberships(session);
+
+        // Company context is required for RLS now; queries below are scoped by company_id.
 
         setIsDriver(false);
         setCurrentDriver(null);
@@ -628,12 +1149,19 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
           const vehicleRes = await supabase
             .from("vehicles")
             .select("*")
+            .eq("company_id", currentCompanyId)
             .eq("driver_id", driverByAuth.id)
             .order("id", { ascending: false });
 
           if (vehicleRes.error) {
-            console.error("Driver vehicle load error:", vehicleRes.error);
-            setInitializationError("A járművek betöltése nem sikerült.");
+            console.error(
+              "Driver vehicle load error:",
+              serializeSupabaseError(vehicleRes.error),
+              vehicleRes.error
+            );
+            setInitializationError(
+              `A járművek betöltése nem sikerült. ${vehicleRes.error?.message ? `(${vehicleRes.error.message})` : ""}`.trim()
+            );
             setDriverVehicles([]);
             setSelectedDriverVehicleId(null);
           } else {
@@ -730,7 +1258,7 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
         const vehiclesResult = await supabase
           .from("vehicles")
           .select("*")
-          .eq("user_id", userId)
+          .eq("company_id", currentCompanyId)
           .order("id", { ascending: false });
 
         const adminVehicleIds = (vehiclesResult.data || [])
@@ -750,33 +1278,33 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
           supabase
             .from("service_history")
             .select("*")
-            .eq("user_id", userId)
+            .eq("company_id", currentCompanyId)
             .order("entry_date", { ascending: false }),
           kmLogsQuery,
           supabase
             .from("vehicle_documents")
             .select("*")
-            .eq("user_id", userId),
+            .eq("company_id", currentCompanyId),
           supabase
             .from("drivers")
             .select("*")
-            .eq("user_id", userId)
+            .eq("company_id", currentCompanyId)
             .order("name", { ascending: true }),
           supabase
             .from("service_partners")
             .select("*")
-            .eq("user_id", userId)
+            .eq("company_id", currentCompanyId)
             .order("name", { ascending: true }),
           supabase
             .from("journey_logs")
             .select("*")
-            .eq("user_id", userId)
+            .eq("company_id", currentCompanyId)
             .order("started_at", { ascending: false })
             .limit(5000),
           supabase
             .from("expense_entries")
             .select("*")
-            .eq("user_id", userId)
+            .eq("company_id", currentCompanyId)
             .order("occurred_at", { ascending: false })
             .limit(5000),
         ]);
@@ -846,7 +1374,7 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
     };
 
     initializeApp();
-  }, [authReady, session?.user?.id]);
+  }, [authReady, session?.user?.id, currentCompanyId]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -899,10 +1427,54 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
     [vehicles]
   );
 
+  const computeVehicleWithLifecycle = (vehicle) => {
+    const lifecycleStatus = String(vehicle?.status || "active");
+    const computed = computeVehicle(vehicle);
+    return { ...computed, lifecycleStatus };
+  };
+
+  const enrichedAllVehicles = useMemo(() => vehicles.map(computeVehicleWithLifecycle), [vehicles]);
+
   const enrichedVehicles = useMemo(
-    () => activeVehicles.map(computeVehicle),
+    () => activeVehicles.map(computeVehicleWithLifecycle),
     [activeVehicles]
   );
+
+  const vehiclesForCards = useMemo(() => {
+    const q = String(query || "").trim().toLowerCase();
+    const base =
+      vehicleLifecycleFilter === "archived"
+        ? archivedVehicles
+        : activeVehicles;
+
+    const statusFiltered =
+      vehicleLifecycleFilter === "all" || vehicleLifecycleFilter === "archived"
+        ? base
+        : base.filter((v) => String(v.status || "active") === vehicleLifecycleFilter);
+
+    return statusFiltered
+      .map(computeVehicleWithLifecycle)
+      .filter((v) => {
+        if (!q) return true;
+        return [v.name, v.plate, v.driver, v.note]
+          .join(" ")
+          .toLowerCase()
+          .includes(q);
+      });
+  }, [activeVehicles, archivedVehicles, vehicleLifecycleFilter, query]);
+
+  const vehicleImageUrlById = useMemo(() => {
+    const map = {};
+    (vehicles || []).forEach((v) => {
+      const id = v?.id;
+      const path = String(v?.imagePath || "").trim();
+      if (!id || !path) return;
+      const { data } = supabase.storage.from("vehicle_images").getPublicUrl(path);
+      const url = data?.publicUrl || "";
+      if (url) map[String(id)] = url;
+    });
+    return map;
+  }, [vehicles]);
 
   const filteredVehicles = useMemo(() => {
     return enrichedVehicles.filter((v) => {
@@ -927,11 +1499,11 @@ const [kmUpdateDraft, setKmUpdateDraft] = useState({
   const selectedVehicle = useMemo(() => {
     return (
       filteredVehicles.find((v) => v.id === selectedId) ||
-      enrichedVehicles.find((v) => v.id === selectedId) ||
+      enrichedAllVehicles.find((v) => v.id === selectedId) ||
       enrichedVehicles[0] ||
       null
     );
-  }, [filteredVehicles, enrichedVehicles, selectedId]);
+  }, [filteredVehicles, enrichedAllVehicles, enrichedVehicles, selectedId]);
 
   const stats = useMemo(() => buildStats(enrichedVehicles), [enrichedVehicles]);
 
@@ -1443,8 +2015,11 @@ const serviceDashboardYearlyCosts = useMemo(() => {
     const ownerState = getOwnerModeAndCustom(selectedVehicle.driver, ownerOptions);
 
     setVehicleDetailsForm({
+      brand: selectedVehicle.brand || "",
+      model: selectedVehicle.model || "",
       name: selectedVehicle.name || "",
       plate: selectedVehicle.plate || "",
+      status: selectedVehicle.lifecycleStatus || "active",
       ownerMode: ownerState.ownerMode,
       customOwner: ownerState.customOwner,
       driverId: selectedVehicle?.driver_id ? String(selectedVehicle.driver_id) : "",
@@ -1578,6 +2153,127 @@ const serviceDashboardYearlyCosts = useMemo(() => {
     showToast(message, "success");
   };
 
+  const companyMembershipsLoadingRef = useRef(false);
+
+  const loadCompanyMemberships = async (sess) => {
+    if (!sess?.user?.id) return;
+    if (companyMembershipsLoadingRef.current) return;
+    companyMembershipsLoadingRef.current = true;
+
+    const withTimeout = async (promise, ms, label) => {
+      let timer;
+      try {
+        return await Promise.race([
+          promise,
+          new Promise((_, reject) => {
+            timer = setTimeout(() => {
+              reject(new Error(`${label || "request"} timeout after ${ms}ms`));
+            }, ms);
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    };
+
+    try {
+      const { data, error } = await withTimeout(
+        supabase
+          .from("company_members")
+          .select("company_id,role,status")
+          .eq("auth_user_id", sess.user.id)
+          .eq("status", "active")
+          .order("company_id", { ascending: true }),
+        8000,
+        "company_members select"
+      );
+      if (error) {
+        console.warn("company_members load error:", error);
+        return;
+      }
+      const rows = Array.isArray(data) ? data : [];
+
+      const ids = Array.from(
+        new Set(rows.map((r) => String(r.company_id || "").trim()).filter(Boolean))
+      );
+
+      let namesById = {};
+      if (ids.length > 0) {
+        const { data: companies, error: companiesErr } = await withTimeout(
+          supabase.from("companies").select("id,name").in("id", ids),
+          8000,
+          "companies select"
+        );
+        if (companiesErr) {
+          console.warn("companies load error:", companiesErr);
+        } else {
+          namesById = Object.fromEntries(
+            (Array.isArray(companies) ? companies : []).map((c) => [String(c.id), c.name || ""])
+          );
+        }
+      }
+
+      setCompanyMemberships(
+        rows.map((r) => {
+          const companyId = String(r.company_id || "").trim();
+          return {
+            company_id: r.company_id,
+            role: r.role,
+            status: r.status,
+            name: namesById[companyId] || "",
+          };
+        })
+      );
+    } catch (e) {
+      console.warn("loadCompanyMemberships error:", e);
+    } finally {
+      companyMembershipsLoadingRef.current = false;
+    }
+  };
+
+  // Company context is required for RLS. If missing, user must explicitly select a company.
+  // (Do NOT auto-switch; it can create repeated switch/request loops when a user has multiple memberships.)
+
+  const switchCompany = async (companyId) => {
+    if (!session?.access_token) return;
+    if (companySwitching) return;
+    const next = String(companyId || "").trim();
+    if (!next) return;
+    if (next === String(currentCompanyId || "")) return;
+
+    setCompanySwitching(true);
+    try {
+      const res = await fetch("/api/company/switch", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ company_id: next }),
+      });
+      const text = await res.text();
+      let body = null;
+      try {
+        body = text ? JSON.parse(text) : null;
+      } catch {
+        body = null;
+      }
+      if (!res.ok) {
+        showToast(body?.error || "Company váltás nem sikerült", "error");
+        return;
+      }
+
+      await supabase.auth.refreshSession();
+      // Hard reload ensures all queries rerun under new JWT claim.
+      window.location.reload();
+    } catch (e) {
+      console.error("switchCompany error:", e);
+      showToast("Company váltás nem sikerült", "error");
+    } finally {
+      setCompanySwitching(false);
+    }
+  };
+
   const isoToLocalInput = (value) => {
     if (!value) return "";
     try {
@@ -1607,6 +2303,386 @@ const serviceDashboardYearlyCosts = useMemo(() => {
       note: row?.note || "",
     });
     setJourneyEditOpen(true);
+  };
+
+  const openAddJourney = () => {
+    if (isDriver) return;
+    setJourneyAddForm((prev) => ({
+      ...prev,
+      vehicleId: journeyVehicleFilter !== "all" ? journeyVehicleFilter : "all",
+      driverId: journeyDriverFilter !== "all" ? journeyDriverFilter : "all",
+      startedAt: "",
+      endedAt: "",
+      startKm: "",
+      endKm: "",
+      startLocation: "",
+      endLocation: "",
+      tripType: "business",
+      note: "",
+    }));
+    setJourneyAddOpen(true);
+  };
+
+  const saveAddedJourney = async () => {
+    if (!session?.user?.id) return;
+    if (isDriver) return;
+
+    const vehicleId = journeyAddForm.vehicleId !== "all" ? Number(journeyAddForm.vehicleId) : null;
+    const driverId = journeyAddForm.driverId !== "all" ? Number(journeyAddForm.driverId) : null;
+    if (!vehicleId || Number.isNaN(vehicleId)) {
+      showToast("Jármű kiválasztása kötelező", "error");
+      return;
+    }
+    if (!driverId || Number.isNaN(driverId)) {
+      showToast("Sofőr kiválasztása kötelező", "error");
+      return;
+    }
+
+    const startedAtIso = localInputToIso(journeyAddForm.startedAt);
+    const endedAtIso = journeyAddForm.endedAt ? localInputToIso(journeyAddForm.endedAt) : null;
+    const startKm = journeyAddForm.startKm === "" ? null : Number(journeyAddForm.startKm);
+    const endKm = journeyAddForm.endKm === "" ? null : Number(journeyAddForm.endKm);
+
+    if (!startedAtIso) {
+      showToast("Indulás időpont megadása kötelező", "error");
+      return;
+    }
+    if (startKm == null || Number.isNaN(startKm) || startKm < 0) {
+      showToast("Érvényes induló km megadása kötelező", "error");
+      return;
+    }
+    if (!String(journeyAddForm.startLocation || "").trim()) {
+      showToast("Indulás helye kötelező", "error");
+      return;
+    }
+    if (endedAtIso) {
+      if (!String(journeyAddForm.endLocation || "").trim()) {
+        showToast("Lezárt útnál az érkezés helye kötelező", "error");
+        return;
+      }
+      if (endKm == null || Number.isNaN(endKm) || endKm < startKm) {
+        showToast("Lezárt útnál az érkező km kötelező és nem lehet kisebb az indulónál", "error");
+        return;
+      }
+      if (new Date(endedAtIso).getTime() < new Date(startedAtIso).getTime()) {
+        showToast("A befejezés nem lehet korábbi az indulásnál", "error");
+        return;
+      }
+    }
+
+    const payload = {
+      user_id: tenantUserId,
+      company_id: currentCompanyId,
+      vehicle_id: vehicleId,
+      driver_id: driverId,
+      started_at: startedAtIso,
+      ended_at: endedAtIso,
+      start_km: Math.round(startKm),
+      end_km: endKm == null ? null : Math.round(endKm),
+      start_location: String(journeyAddForm.startLocation || "").trim(),
+      end_location: endedAtIso ? String(journeyAddForm.endLocation || "").trim() : null,
+      trip_type: journeyAddForm.tripType === "private" ? "private" : "business",
+      note: String(journeyAddForm.note || "").trim(),
+      created_by_auth_user_id: session.user.id,
+    };
+
+    setJourneyLoading(true);
+    try {
+      const { data, error } = await supabase.from("journey_logs").insert(payload).select("*").limit(1);
+      if (error) {
+        console.error("journey_logs admin insert error:", serializeSupabaseError(error), error);
+        showToast("Az út mentése nem sikerült", "error");
+        return;
+      }
+      const inserted = data?.[0];
+      if (inserted?.id) {
+        setJourneyLogs((prev) => [inserted, ...(Array.isArray(prev) ? prev : [])]);
+      }
+      setJourneyAddOpen(false);
+      showSaved("Út rögzítve");
+    } catch (e) {
+      console.error("saveAddedJourney error:", e);
+      showToast("Az út mentése nem sikerült", "error");
+    } finally {
+      setJourneyLoading(false);
+    }
+  };
+
+  const openAddExpense = () => {
+    if (isDriver) return;
+    setExpenseAddMode("manual");
+    setExpenseAddSaving(false);
+    setExpenseAddFile(null);
+    setExpenseAddReceiptFile(null);
+    setExpenseAddForm((prev) => ({
+      ...prev,
+      vehicleId: expenseVehicleFilter !== "all" ? expenseVehicleFilter : "all",
+      driverId: expenseDriverFilter !== "all" ? expenseDriverFilter : "all",
+      expenseType: expenseTypeFilter !== "all" ? expenseTypeFilter : "fuel",
+      occurredAt: todayIso(),
+      stationName: "",
+      stationLocation: "",
+      odometerKm: "",
+      fuelType: "",
+      liters: "",
+      unitPrice: "",
+      grossAmount: "",
+      currency: "HUF",
+      netAmount: "",
+      vatAmount: "",
+      vatRate: "",
+      paymentMethod: "",
+      paymentCardLast4: "",
+      note: "",
+    }));
+    setExpenseAddOpen(true);
+  };
+
+  const saveAddedExpenseManual = async () => {
+    if (!session?.user?.id) return;
+    if (isDriver) return;
+
+    const vehicleId = expenseAddForm.vehicleId !== "all" ? Number(expenseAddForm.vehicleId) : null;
+    const driverId = expenseAddForm.driverId !== "all" ? Number(expenseAddForm.driverId) : null;
+    if (!vehicleId || Number.isNaN(vehicleId)) {
+      showToast("Jármű kiválasztása kötelező", "error");
+      return;
+    }
+    if (!driverId || Number.isNaN(driverId)) {
+      showToast("Sofőr kiválasztása kötelező", "error");
+      return;
+    }
+
+    const occurredAt = String(expenseAddForm.occurredAt || "").trim();
+    const occurredIso = occurredAt ? new Date(`${occurredAt}T12:00:00.000Z`).toISOString() : null;
+    if (!occurredIso) {
+      showToast("Dátum megadása kötelező", "error");
+      return;
+    }
+
+    const gross = normalizeNumberInput(expenseAddForm.grossAmount).num;
+    if (gross == null || gross < 0) {
+      showToast("Érvényes bruttó összeg megadása kötelező", "error");
+      return;
+    }
+
+    const expenseType = String(expenseAddForm.expenseType || "fuel").trim() || "fuel";
+    const liters = normalizeNumberInput(expenseAddForm.liters).num;
+    if (expenseType === "fuel" && (liters == null || liters <= 0)) {
+      showToast("Tankolásnál a liter megadása kötelező", "error");
+      return;
+    }
+
+    const vehicle = vehicles.find((v) => String(v.id) === String(vehicleId)) || null;
+    if (!vehicle) {
+      showToast("Ismeretlen jármű", "error");
+      return;
+    }
+
+    const computedVat = computeVatFields({
+      gross,
+      net: normalizeNumberInput(expenseAddForm.netAmount).num,
+      vat: normalizeNumberInput(expenseAddForm.vatAmount).num,
+      vatRate: normalizeNumberInput(expenseAddForm.vatRate).num,
+      defaultVatRate:
+        (expenseAddForm.vatRate ?? "") === "" &&
+        (expenseAddForm.netAmount ?? "") === "" &&
+        (expenseAddForm.vatAmount ?? "") === ""
+          ? defaultVatRateForExpense({ currency: expenseAddForm.currency, expenseType: expenseAddForm.expenseType })
+          : null,
+    });
+
+    const payload = {
+      user_id: tenantUserId,
+      company_id: currentCompanyId,
+      vehicle_id: vehicleId,
+      driver_id: driverId,
+      expense_type: expenseType,
+      occurred_at: occurredIso,
+      station_name: String(expenseAddForm.stationName || "").trim() || null,
+      station_location: String(expenseAddForm.stationLocation || "").trim() || null,
+      odometer_km:
+        normalizeNumberInput(expenseAddForm.odometerKm).num == null
+          ? null
+          : Math.round(normalizeNumberInput(expenseAddForm.odometerKm).num),
+      currency: String(expenseAddForm.currency || "HUF").trim() || "HUF",
+      gross_amount: Number(gross.toFixed(2)),
+      net_amount: computedVat.net == null ? null : Number(Number(computedVat.net).toFixed(2)),
+      vat_amount: computedVat.vat == null ? null : Number(Number(computedVat.vat).toFixed(2)),
+      vat_rate: computedVat.vatRate == null ? null : Number(Number(computedVat.vatRate).toFixed(2)),
+      payment_method: String(expenseAddForm.paymentMethod || "").trim() || null,
+      payment_card_last4: String(expenseAddForm.paymentCardLast4 || "").trim() || null,
+      fuel_type: expenseType === "fuel" ? String(expenseAddForm.fuelType || "").trim() || null : null,
+      liters: expenseType === "fuel" && liters != null ? Number(liters.toFixed(3)) : null,
+      unit_price:
+        expenseType === "fuel" && normalizeNumberInput(expenseAddForm.unitPrice).num != null
+          ? Number(normalizeNumberInput(expenseAddForm.unitPrice).num.toFixed(3))
+          : null,
+      receipt_storage_path: null,
+      receipt_mime: null,
+      receipt_original_filename: null,
+      status: "posted",
+      note: String(expenseAddForm.note || "").trim() || null,
+      created_by_auth_user_id: session.user.id,
+    };
+
+    setExpenseAddSaving(true);
+    try {
+      if (expenseAddReceiptFile) {
+        const file = expenseAddReceiptFile;
+        const allowedTypes = ["application/pdf", "image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"];
+        const maxBytes = 8 * 1024 * 1024;
+        if (file.size > maxBytes) {
+          showToast("A bizonylat túl nagy (max 8 MB)", "error");
+          return;
+        }
+        if (file.type && !allowedTypes.includes(file.type)) {
+          showToast("Csak PDF, JPG, PNG vagy WEBP tölthető fel", "error");
+          return;
+        }
+
+        const month = String(payload.occurred_at || "").slice(0, 7) || todayIso().slice(0, 7);
+        const storagePath = `${session.user.id}/${vehicleId}/${month}/${Date.now()}-${sanitizeStorageSegment(file.name)}`;
+        const { error: uploadError } = await supabase.storage.from(EXPENSE_RECEIPTS_STORAGE_BUCKET).upload(storagePath, file, {
+          cacheControl: "3600",
+          upsert: false,
+          contentType: file.type || undefined,
+        });
+        if (uploadError) {
+          if (isSupabaseStorageBucketNotFoundError(uploadError)) {
+            showToast(expenseReceiptBucketMissingUserHint(EXPENSE_RECEIPTS_STORAGE_BUCKET), "error");
+          } else {
+            showToast("A bizonylat feltöltése nem sikerült", "error");
+          }
+          return;
+        }
+        payload.receipt_storage_path = storagePath;
+        payload.receipt_mime = file.type || null;
+        payload.receipt_original_filename = file.name || null;
+      }
+
+      const { data, error } = await supabase.from("expense_entries").insert(payload).select("*").limit(1);
+      if (error) {
+        if (payload.receipt_storage_path) {
+          await supabase.storage.from(EXPENSE_RECEIPTS_STORAGE_BUCKET).remove([payload.receipt_storage_path]);
+        }
+        console.error("expense_entries admin manual insert error:", serializeSupabaseError(error), error);
+        showToast("A költség mentése nem sikerült", "error");
+        return;
+      }
+      const inserted = data?.[0];
+      if (inserted?.id) {
+        setExpenseEntries((prev) => [inserted, ...(Array.isArray(prev) ? prev : [])]);
+      }
+      setExpenseAddOpen(false);
+      showSaved("Költség rögzítve");
+    } catch (e) {
+      console.error("saveAddedExpenseManual error:", e);
+      showToast("A költség mentése nem sikerült", "error");
+    } finally {
+      setExpenseAddSaving(false);
+    }
+  };
+
+  const saveAddedExpenseAi = async () => {
+    if (!session?.user?.id) return;
+    if (isDriver) return;
+
+    const vehicleId = expenseAddForm.vehicleId !== "all" ? Number(expenseAddForm.vehicleId) : null;
+    const driverId = expenseAddForm.driverId !== "all" ? Number(expenseAddForm.driverId) : null;
+    if (!vehicleId || Number.isNaN(vehicleId)) {
+      showToast("Jármű kiválasztása kötelező", "error");
+      return;
+    }
+    if (!driverId || Number.isNaN(driverId)) {
+      showToast("Sofőr kiválasztása kötelező", "error");
+      return;
+    }
+    const file = expenseAddFile;
+    if (!file) {
+      showToast("Válassz bizonylat képet vagy PDF-et", "error");
+      return;
+    }
+
+    setExpenseAddSaving(true);
+    try {
+      const month = todayIso().slice(0, 7);
+      const storagePath = `${session.user.id}/${vehicleId}/${month}/${Date.now()}-${sanitizeStorageSegment(file.name)}`;
+      const { error: uploadError } = await supabase.storage.from(EXPENSE_RECEIPTS_STORAGE_BUCKET).upload(storagePath, file, {
+        cacheControl: "3600",
+        upsert: false,
+        contentType: file.type || undefined,
+      });
+      if (uploadError) {
+        if (isSupabaseStorageBucketNotFoundError(uploadError)) {
+          showToast(expenseReceiptBucketMissingUserHint(EXPENSE_RECEIPTS_STORAGE_BUCKET), "error");
+        } else {
+          showToast("A bizonylat feltöltése nem sikerült", "error");
+        }
+        return;
+      }
+
+      const { data: sessWrap } = await supabase.auth.getSession();
+      const accessToken = sessWrap?.session?.access_token || session?.access_token;
+      if (!accessToken) {
+        showToast("Bejelentkezés lejárt. Jelentkezz be újra.", "error");
+        return;
+      }
+
+      const hint =
+        expenseAddAiProvider === "openai" || expenseAddAiProvider === "gemini" || expenseAddAiProvider === "auto"
+          ? expenseAddAiProvider
+          : "auto";
+      const fnUrl = `/api/fleet/process-expense-receipt?ai_provider=${encodeURIComponent(hint)}`;
+      const fnRes = await fetch(fnUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({
+          receipt_storage_path: storagePath,
+          vehicle_id: vehicleId,
+          driver_id: driverId,
+          ai_provider: hint,
+        }),
+      });
+
+      const fnText = await fnRes.text();
+      let fnData = null;
+      try {
+        fnData = fnText ? JSON.parse(fnText) : null;
+      } catch {
+        fnData = null;
+      }
+      if (!fnRes.ok) {
+        const msg = formatProcessExpenseReceiptHttpFailure(fnRes.status, fnData, fnText);
+        showToast(msg, "error");
+        return;
+      }
+
+      const rawEntryId = fnData?.entry_id ?? fnData?.entry?.id;
+      const entryId =
+        rawEntryId !== undefined && rawEntryId !== null && String(rawEntryId).trim() !== "" ? String(rawEntryId).trim() : null;
+
+      let draft =
+        fnData?.entry && typeof fnData.entry === "object" && !Array.isArray(fnData.entry) ? fnData.entry : null;
+      if (entryId && !draft?.id) {
+        const { data: entryRows } = await supabase.from("expense_entries").select("*").eq("id", entryId).limit(1);
+        draft = entryRows?.[0] || null;
+      }
+
+      if (draft?.id) {
+        setExpenseEntries((prev) => [draft, ...(Array.isArray(prev) ? prev : [])]);
+        setExpenseAddOpen(false);
+        showSaved("AI draft elkészült");
+        return;
+      }
+
+      showToast("AI feldolgozás kész, de nem jött vissza bejegyzés.", "error");
+    } catch (e) {
+      console.error("saveAddedExpenseAi error:", e);
+      showToast("AI feldolgozás nem sikerült", "error");
+    } finally {
+      setExpenseAddSaving(false);
+    }
   };
 
   const saveEditedJourney = async () => {
@@ -1684,6 +2760,392 @@ const serviceDashboardYearlyCosts = useMemo(() => {
       showToast("A bejegyzés mentése nem sikerült", "error");
     } finally {
       setJourneyLoading(false);
+    }
+  };
+
+  const openAdminDeleteJourney = (row) => {
+    if (isDriver) return;
+    if (!row?.id) return;
+    const vehicle = vehicles.find((v) => String(v.id) === String(row.vehicle_id)) || null;
+    const driver = drivers.find((d) => String(d.id) === String(row.driver_id)) || null;
+    const dateLabel = String(row.started_at || "").slice(0, 10) || "—";
+    const summary = `${dateLabel} • ${vehicle?.plate || "—"} • ${driver?.name || "—"}`;
+
+    setAdminDeleteDialog({
+      kind: "journey",
+      id: row.id,
+      userId: row.user_id,
+      summary,
+    });
+  };
+
+  const openAdminDeleteExpense = (row) => {
+    if (isDriver) return;
+    if (!row?.id) return;
+    const vehicle = vehicles.find((v) => String(v.id) === String(row.vehicle_id)) || null;
+    const driver = drivers.find((d) => String(d.id) === String(row.driver_id)) || null;
+    const dateLabel = String(row.occurred_at || "").slice(0, 10) || "—";
+    const summary = `${dateLabel} • ${vehicle?.plate || "—"} • ${driver?.name || "—"} • ${Number(row.gross_amount || 0).toLocaleString("hu-HU")} ${
+      row.currency || "HUF"
+    }`;
+
+    setAdminDeleteDialog({
+      kind: "expense",
+      id: row.id,
+      userId: row.user_id,
+      receiptPath: row.receipt_storage_path || "",
+      summary,
+    });
+  };
+
+  const openEditExpense = (row) => {
+    if (isDriver) return;
+    if (!row?.id) return;
+    setExpenseEditing(row);
+    setExpenseEditForm({
+      occurredAt: String(row.occurred_at || "").slice(0, 10) || todayIso(),
+      expenseType: row.expense_type || "fuel",
+      stationName: row.station_name || "",
+      stationLocation: row.station_location || "",
+      odometerKm: row.odometer_km != null ? String(row.odometer_km) : "",
+      currency: row.currency || "HUF",
+      grossAmount: row.gross_amount != null ? String(row.gross_amount) : "",
+      netAmount: row.net_amount != null ? String(row.net_amount) : "",
+      vatAmount: row.vat_amount != null ? String(row.vat_amount) : "",
+      vatRate: row.vat_rate != null ? String(row.vat_rate) : "",
+      invoiceNumber: row.invoice_number || "",
+      paymentMethod: row.payment_method || "",
+      paymentCardLast4: row.payment_card_last4 || "",
+      fuelType: row.fuel_type || "",
+      liters: row.liters != null ? String(row.liters) : "",
+      unitPrice: row.unit_price != null ? String(row.unit_price) : "",
+      status: row.status || "posted",
+      note: row.note || "",
+    });
+    setExpenseEditOpen(true);
+  };
+
+  const computeVatFields = ({ gross, net, vat, vatRate, defaultVatRate = null }) => {
+    const round2 = (n) => (n == null || !Number.isFinite(n) ? null : Number(Number(n).toFixed(2)));
+    const roundRate = (n) => (n == null || !Number.isFinite(n) ? null : Number(Number(n).toFixed(2)));
+
+    const g = gross;
+    const n = net;
+    const v = vat;
+    let r = vatRate;
+
+    const result = { net: n, vat: v, vatRate: r };
+    if (g == null || !Number.isFinite(g) || g < 0) return result;
+
+    // If nothing VAT-related was provided but we have a default, apply it.
+    if ((r == null || !Number.isFinite(r)) && (n == null || !Number.isFinite(n)) && (v == null || !Number.isFinite(v))) {
+      if (defaultVatRate != null && Number.isFinite(defaultVatRate) && defaultVatRate >= 0) {
+        r = defaultVatRate;
+        result.vatRate = roundRate(r);
+      }
+    }
+
+    // Priority: if rate present -> compute net+vat; else if net present -> compute vat+rate; else if vat present -> compute net+rate.
+    if (r != null && Number.isFinite(r) && r >= 0) {
+      const denom = 1 + r / 100;
+      if (denom > 0) {
+        const computedNet = g / denom;
+        const computedVat = g - computedNet;
+        result.net = round2(computedNet);
+        result.vat = round2(computedVat);
+        result.vatRate = roundRate(r);
+      }
+      return result;
+    }
+
+    if (n != null && Number.isFinite(n) && n >= 0) {
+      const computedVat = g - n;
+      const computedRate = n > 0 ? (computedVat / n) * 100 : null;
+      result.net = round2(n);
+      result.vat = round2(computedVat);
+      result.vatRate = computedRate == null ? null : roundRate(computedRate);
+      return result;
+    }
+
+    if (v != null && Number.isFinite(v)) {
+      const computedNet = g - v;
+      const computedRate = computedNet > 0 ? (v / computedNet) * 100 : null;
+      result.net = round2(computedNet);
+      result.vat = round2(v);
+      result.vatRate = computedRate == null ? null : roundRate(computedRate);
+      return result;
+    }
+
+    return result;
+  };
+
+  const normalizeNumberInput = (value) => {
+    const raw = String(value ?? "").trim().replace(",", ".");
+    if (raw === "") return { raw: "", num: null };
+    const n = Number(raw);
+    return { raw, num: Number.isNaN(n) ? null : n };
+  };
+
+  const defaultVatRateForExpense = ({ currency, expenseType }) => {
+    const cur = String(currency || "").trim().toUpperCase();
+    const type = String(expenseType || "").trim().toLowerCase();
+    // HU default VAT assumption when missing on AI/manual: editable after fill.
+    if (cur === "HUF") return 27;
+    // If not HUF, don't guess.
+    if (type === "fuel") return null;
+    return null;
+  };
+
+  // Auto-fill VAT fields for admin expense edit (only fill missing fields).
+  useEffect(() => {
+    if (!expenseEditOpen) return;
+    const gross = normalizeNumberInput(expenseEditForm.grossAmount).num;
+    const net = normalizeNumberInput(expenseEditForm.netAmount).num;
+    const vat = normalizeNumberInput(expenseEditForm.vatAmount).num;
+    const rate = normalizeNumberInput(expenseEditForm.vatRate).num;
+
+    const defaultRate =
+      (expenseEditForm.vatRate ?? "") === "" &&
+      (expenseEditForm.netAmount ?? "") === "" &&
+      (expenseEditForm.vatAmount ?? "") === ""
+        ? defaultVatRateForExpense({ currency: expenseEditForm.currency, expenseType: expenseEditForm.expenseType })
+        : null;
+
+    const computed = computeVatFields({ gross, net, vat, vatRate: rate, defaultVatRate: defaultRate });
+    const next = {};
+
+    if ((expenseEditForm.netAmount ?? "") === "" && computed.net != null) next.netAmount = String(computed.net);
+    if ((expenseEditForm.vatAmount ?? "") === "" && computed.vat != null) next.vatAmount = String(computed.vat);
+    if ((expenseEditForm.vatRate ?? "") === "" && computed.vatRate != null) next.vatRate = String(computed.vatRate);
+
+    if (Object.keys(next).length > 0) {
+      setExpenseEditForm((p) => ({ ...p, ...next }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expenseEditForm.grossAmount, expenseEditForm.netAmount, expenseEditForm.vatAmount, expenseEditForm.vatRate, expenseEditOpen]);
+
+  // Auto-fill VAT fields for AI draft edit dialog (only fill missing fields).
+  useEffect(() => {
+    if (!driverExpenseDraftOpen) return;
+    const gross = normalizeNumberInput(driverExpenseDraftForm.grossAmount).num;
+    const net = normalizeNumberInput(driverExpenseDraftForm.netAmount).num;
+    const vat = normalizeNumberInput(driverExpenseDraftForm.vatAmount).num;
+    const rate = normalizeNumberInput(driverExpenseDraftForm.vatRate).num;
+
+    const defaultRate =
+      (driverExpenseDraftForm.vatRate ?? "") === "" &&
+      (driverExpenseDraftForm.netAmount ?? "") === "" &&
+      (driverExpenseDraftForm.vatAmount ?? "") === ""
+        ? defaultVatRateForExpense({ currency: driverExpenseDraftForm.currency, expenseType: driverExpenseDraftForm.expenseType })
+        : null;
+
+    const computed = computeVatFields({ gross, net, vat, vatRate: rate, defaultVatRate: defaultRate });
+    const next = {};
+
+    if ((driverExpenseDraftForm.netAmount ?? "") === "" && computed.net != null) next.netAmount = String(computed.net);
+    if ((driverExpenseDraftForm.vatAmount ?? "") === "" && computed.vat != null) next.vatAmount = String(computed.vat);
+    if ((driverExpenseDraftForm.vatRate ?? "") === "" && computed.vatRate != null) next.vatRate = String(computed.vatRate);
+
+    if (Object.keys(next).length > 0) {
+      setDriverExpenseDraftForm((p) => ({ ...p, ...next }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [driverExpenseDraftForm.grossAmount, driverExpenseDraftForm.netAmount, driverExpenseDraftForm.vatAmount, driverExpenseDraftForm.vatRate, driverExpenseDraftOpen]);
+
+  // Auto-fill VAT fields for admin expense add (manual) dialog (only fill missing fields).
+  useEffect(() => {
+    if (!expenseAddOpen) return;
+    if (expenseAddMode !== "manual") return;
+
+    const gross = normalizeNumberInput(expenseAddForm.grossAmount).num;
+    const net = normalizeNumberInput(expenseAddForm.netAmount).num;
+    const vat = normalizeNumberInput(expenseAddForm.vatAmount).num;
+    const rate = normalizeNumberInput(expenseAddForm.vatRate).num;
+
+    const defaultRate =
+      (expenseAddForm.vatRate ?? "") === "" &&
+      (expenseAddForm.netAmount ?? "") === "" &&
+      (expenseAddForm.vatAmount ?? "") === ""
+        ? defaultVatRateForExpense({ currency: expenseAddForm.currency, expenseType: expenseAddForm.expenseType })
+        : null;
+
+    const computed = computeVatFields({ gross, net, vat, vatRate: rate, defaultVatRate: defaultRate });
+    const next = {};
+
+    if ((expenseAddForm.netAmount ?? "") === "" && computed.net != null) next.netAmount = String(computed.net);
+    if ((expenseAddForm.vatAmount ?? "") === "" && computed.vat != null) next.vatAmount = String(computed.vat);
+    if ((expenseAddForm.vatRate ?? "") === "" && computed.vatRate != null) next.vatRate = String(computed.vatRate);
+
+    if (Object.keys(next).length > 0) {
+      setExpenseAddForm((p) => ({ ...p, ...next }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    expenseAddForm.grossAmount,
+    expenseAddForm.netAmount,
+    expenseAddForm.vatAmount,
+    expenseAddForm.vatRate,
+    expenseAddForm.currency,
+    expenseAddForm.expenseType,
+    expenseAddMode,
+    expenseAddOpen,
+  ]);
+
+  const saveEditedExpense = async () => {
+    if (!session?.user?.id || !expenseEditing?.id) return;
+
+    const occurredAt = String(expenseEditForm.occurredAt || "").trim();
+    const occurredIso = occurredAt ? new Date(`${occurredAt}T12:00:00.000Z`).toISOString() : null;
+    if (!occurredIso) {
+      showToast("Dátum megadása kötelező", "error");
+      return;
+    }
+
+    const toNum = (v) => normalizeNumberInput(v).num;
+
+    const expenseType = String(expenseEditForm.expenseType || "fuel").trim() || "fuel";
+    const currency = String(expenseEditForm.currency || "HUF").trim() || "HUF";
+    const grossAmount = toNum(expenseEditForm.grossAmount);
+    if (grossAmount == null || grossAmount < 0) {
+      showToast("Érvényes bruttó összeg megadása kötelező", "error");
+      return;
+    }
+
+    const liters = toNum(expenseEditForm.liters);
+    if (expenseType === "fuel") {
+      if (liters == null || liters <= 0) {
+        showToast("Tankolásnál a liter megadása kötelező", "error");
+        return;
+      }
+    }
+
+    const computedVat = computeVatFields({
+      gross: grossAmount,
+      net: toNum(expenseEditForm.netAmount),
+      vat: toNum(expenseEditForm.vatAmount),
+      vatRate: toNum(expenseEditForm.vatRate),
+      defaultVatRate:
+        (expenseEditForm.vatRate ?? "") === "" &&
+        (expenseEditForm.netAmount ?? "") === "" &&
+        (expenseEditForm.vatAmount ?? "") === ""
+          ? defaultVatRateForExpense({ currency: expenseEditForm.currency, expenseType: expenseEditForm.expenseType })
+          : null,
+    });
+
+    const payload = {
+      occurred_at: occurredIso,
+      expense_type: expenseType,
+      station_name: String(expenseEditForm.stationName || "").trim() || null,
+      station_location: String(expenseEditForm.stationLocation || "").trim() || null,
+      odometer_km: toNum(expenseEditForm.odometerKm) == null ? null : Math.round(toNum(expenseEditForm.odometerKm)),
+      currency,
+      gross_amount: Number(grossAmount.toFixed(2)),
+      net_amount: computedVat.net == null ? null : Number(Number(computedVat.net).toFixed(2)),
+      vat_amount: computedVat.vat == null ? null : Number(Number(computedVat.vat).toFixed(2)),
+      vat_rate: computedVat.vatRate == null ? null : Number(Number(computedVat.vatRate).toFixed(2)),
+      invoice_number: String(expenseEditForm.invoiceNumber || "").trim() || null,
+      payment_method: String(expenseEditForm.paymentMethod || "").trim() || null,
+      payment_card_last4: String(expenseEditForm.paymentCardLast4 || "").trim() || null,
+      fuel_type: expenseType === "fuel" ? String(expenseEditForm.fuelType || "").trim() || null : null,
+      liters: expenseType === "fuel" && liters != null ? Number(liters.toFixed(3)) : null,
+      unit_price:
+        expenseType === "fuel" && toNum(expenseEditForm.unitPrice) != null
+          ? Number(toNum(expenseEditForm.unitPrice).toFixed(3))
+          : null,
+      status: String(expenseEditForm.status || "posted").trim() || "posted",
+      note: String(expenseEditForm.note || "").trim() || null,
+    };
+
+    setExpenseLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from("expense_entries")
+        .update(payload)
+        .eq("id", expenseEditing.id)
+        .eq("user_id", session.user.id)
+        .select("*")
+        .limit(1);
+
+      if (error) {
+        console.error("expense_entries admin update error:", serializeSupabaseError(error), error);
+        showToast("A bejegyzés mentése nem sikerült", "error");
+        return;
+      }
+
+      const updated = data?.[0];
+      if (updated?.id) {
+        setExpenseEntries((prev) => prev.map((row) => (row.id === updated.id ? updated : row)));
+      }
+
+      setExpenseEditOpen(false);
+      setExpenseEditing(null);
+      showSaved("Bejegyzés mentve");
+    } catch (error) {
+      console.error("saveEditedExpense error:", error);
+      showToast("A bejegyzés mentése nem sikerült", "error");
+    } finally {
+      setExpenseLoading(false);
+    }
+  };
+
+  const confirmAdminDelete = async () => {
+    if (!session?.user?.id) return;
+    const target = adminDeleteDialog;
+    if (!target?.id || !target?.kind) return;
+
+    setAdminDeleteSaving(true);
+    try {
+      if (target.kind === "journey") {
+        const { error } = await supabase.from("journey_logs").delete().eq("id", target.id).eq("user_id", session.user.id);
+        if (error) {
+          console.error("journey_logs admin delete error:", serializeSupabaseError(error), error);
+          showToast("Az út bejegyzés törlése nem sikerült", "error");
+          return;
+        }
+
+        setJourneyLogs((prev) => prev.filter((r) => String(r.id) !== String(target.id)));
+        if (journeyEditing?.id && String(journeyEditing.id) === String(target.id)) {
+          setJourneyEditOpen(false);
+          setJourneyEditing(null);
+        }
+        showSaved("Út bejegyzés törölve");
+      }
+
+      if (target.kind === "expense") {
+        const receiptPath = String(target.receiptPath || "").trim();
+        if (receiptPath) {
+          const { error: storageErr } = await supabase.storage.from(EXPENSE_RECEIPTS_STORAGE_BUCKET).remove([receiptPath]);
+          if (storageErr) {
+            console.error("expense-receipts delete error (admin):", storageErr);
+          }
+
+          const { error: jobsErr } = await supabase.from("expense_ai_jobs").delete().eq("receipt_storage_path", receiptPath);
+          if (jobsErr) {
+            console.error("expense_ai_jobs delete error (admin):", jobsErr);
+          }
+        }
+
+        const { error } = await supabase.from("expense_entries").delete().eq("id", target.id).eq("user_id", session.user.id);
+        if (error) {
+          console.error("expense_entries admin delete error:", serializeSupabaseError(error), error);
+          showToast("A költség törlése nem sikerült", "error");
+          return;
+        }
+
+        setExpenseEntries((prev) => prev.filter((r) => String(r.id) !== String(target.id)));
+        if (driverExpenseDraftEntry?.id && String(driverExpenseDraftEntry.id) === String(target.id)) {
+          setDriverExpenseDraftOpen(false);
+          setDriverExpenseDraftEntry(null);
+        }
+        showSaved("Költség törölve");
+      }
+
+      setAdminDeleteDialog(null);
+    } catch (error) {
+      console.error("confirmAdminDelete error:", error);
+      showToast("A törlés nem sikerült", "error");
+    } finally {
+      setAdminDeleteSaving(false);
     }
   };
 
@@ -1774,6 +3236,23 @@ const serviceDashboardYearlyCosts = useMemo(() => {
       ...rows.map((r) => {
         const vehicle = vehicles.find((v) => String(v.id) === String(r.vehicle_id)) || null;
         const driver = drivers.find((d) => String(d.id) === String(r.driver_id)) || null;
+
+        const gross = r.gross_amount == null ? null : Number(r.gross_amount);
+        const net = r.net_amount == null ? null : Number(r.net_amount);
+        const vat = r.vat_amount == null ? null : Number(r.vat_amount);
+        const vatRate = r.vat_rate == null ? null : Number(r.vat_rate);
+        const defaultRate =
+          (net == null && vat == null && vatRate == null) && String(r.currency || "").toUpperCase().trim() === "HUF"
+            ? 27
+            : null;
+        const computedVat = computeVatFields({
+          gross,
+          net,
+          vat,
+          vatRate,
+          defaultVatRate: defaultRate,
+        });
+
         return [
           String(r.occurred_at || "").slice(0, 10),
           vehicle?.plate || "",
@@ -1786,9 +3265,9 @@ const serviceDashboardYearlyCosts = useMemo(() => {
           r.unit_price ?? "",
           r.gross_amount ?? "",
           r.currency || "",
-          r.vat_rate ?? "",
-          r.net_amount ?? "",
-          r.vat_amount ?? "",
+          computedVat.vatRate ?? "",
+          computedVat.net ?? "",
+          computedVat.vat ?? "",
           r.invoice_number || "",
           r.payment_method || "",
           r.payment_card_last4 || "",
@@ -1811,10 +3290,15 @@ const serviceDashboardYearlyCosts = useMemo(() => {
     }
 
     try {
-      const { data, error } = await supabase.storage.from("expense-receipts").createSignedUrl(storagePath, 300);
+      const { data, error } = await supabase.storage.from(EXPENSE_RECEIPTS_STORAGE_BUCKET).createSignedUrl(storagePath, 300);
       if (error) {
-        console.error("createSignedUrl expense-receipts error:", error);
-        showToast("A bizonylat link nem kérhető le", "error");
+        if (isSupabaseStorageBucketNotFoundError(error)) {
+          console.warn("createSignedUrl expense-receipts:", serializeSupabaseError(error));
+          showToast(expenseReceiptBucketMissingUserHint(EXPENSE_RECEIPTS_STORAGE_BUCKET), "error");
+        } else {
+          console.error("createSignedUrl expense-receipts error:", error);
+          showToast("A bizonylat link nem kérhető le", "error");
+        }
         return;
       }
 
@@ -1877,7 +3361,8 @@ const serviceDashboardYearlyCosts = useMemo(() => {
     }
 
     const payload = {
-      user_id: session.user.id,
+      user_id: tenantUserId,
+      company_id: currentCompanyId,
       name: driverForm.name.trim(),
       phone: driverForm.phone.trim(),
       email: driverForm.email.trim(),
@@ -1886,7 +3371,7 @@ const serviceDashboardYearlyCosts = useMemo(() => {
     };
 
     const query = driverEditing?.id
-      ? supabase.from("drivers").update(payload).eq("id", driverEditing.id).eq("user_id", session.user.id)
+      ? supabase.from("drivers").update(payload).eq("id", driverEditing.id).eq("company_id", currentCompanyId)
       : supabase.from("drivers").insert(payload).select("*").limit(1);
 
     const { data, error } = await query;
@@ -1910,7 +3395,7 @@ const serviceDashboardYearlyCosts = useMemo(() => {
 
   const deleteDriver = async () => {
     if (!session?.user?.id || !driverToDelete?.id) return;
-    const { error } = await supabase.from("drivers").delete().eq("id", driverToDelete.id).eq("user_id", session.user.id);
+    const { error } = await supabase.from("drivers").delete().eq("id", driverToDelete.id).eq("company_id", currentCompanyId);
     if (error) {
       console.error("drivers delete error:", serializeSupabaseError(error), error);
       showToast("A sofőr törlése nem sikerült", "error");
@@ -1961,7 +3446,8 @@ const serviceDashboardYearlyCosts = useMemo(() => {
     }
 
     const payload = {
-      user_id: session.user.id,
+      user_id: tenantUserId,
+      company_id: currentCompanyId,
       name: partnerForm.name.trim(),
       phone: partnerForm.phone.trim(),
       email: partnerForm.email.trim(),
@@ -1972,7 +3458,7 @@ const serviceDashboardYearlyCosts = useMemo(() => {
     };
 
     const query = partnerEditing?.id
-      ? supabase.from("service_partners").update(payload).eq("id", partnerEditing.id).eq("user_id", session.user.id)
+      ? supabase.from("service_partners").update(payload).eq("id", partnerEditing.id).eq("company_id", currentCompanyId)
       : supabase.from("service_partners").insert(payload).select("*").limit(1);
 
     const { data, error } = await query;
@@ -2000,7 +3486,7 @@ const serviceDashboardYearlyCosts = useMemo(() => {
       .from("service_partners")
       .delete()
       .eq("id", partnerToDelete.id)
-      .eq("user_id", session.user.id);
+      .eq("company_id", currentCompanyId);
     if (error) {
       console.error("service_partners delete error:", serializeSupabaseError(error), error);
       showToast("A szervizpartner törlése nem sikerült", "error");
@@ -2547,6 +4033,8 @@ const serviceDashboardYearlyCosts = useMemo(() => {
     }
 
     const vehiclePayload = {
+      brand: String(vehicleDetailsForm.brand || "").trim() || null,
+      model: String(vehicleDetailsForm.model || "").trim() || null,
       name: vehicleDetailsForm.name.trim(),
       plate: vehicleDetailsForm.plate.toUpperCase().trim(),
       driver: resolvedDriverName,
@@ -2567,6 +4055,16 @@ const serviceDashboardYearlyCosts = useMemo(() => {
           : Number(vehicleDetailsForm.timingBeltIntervalKm),
     };
 
+    if (currentCompanyRole === "admin") {
+      const status =
+        vehicleDetailsForm.status === "active" ||
+        vehicleDetailsForm.status === "service" ||
+        vehicleDetailsForm.status === "inactive"
+          ? vehicleDetailsForm.status
+          : "active";
+      vehiclePayload.status = status;
+    }
+
     const insuranceExpiryValue = vehicleDetailsForm.insuranceExpiry || "";
     const inspectionExpiryValue = vehicleDetailsForm.inspectionExpiry || "";
 
@@ -2575,7 +4073,7 @@ const serviceDashboardYearlyCosts = useMemo(() => {
         .from("vehicles")
         .update(vehiclePayload)
         .eq("id", selectedId)
-        .eq("user_id", session.user.id);
+        .eq("company_id", currentCompanyId);
 
       if (vehicleError) {
         console.error("Vehicle update error:", serializeSupabaseError(vehicleError), vehicleError);
@@ -2587,7 +4085,7 @@ const serviceDashboardYearlyCosts = useMemo(() => {
         .from("vehicle_documents")
         .update({ expiry: insuranceExpiryValue || null })
         .eq("vehicle_id", selectedId)
-        .eq("user_id", session.user.id)
+        .eq("company_id", currentCompanyId)
         .eq("doc_key", "insurance");
 
       if (insuranceExpiryError) {
@@ -2600,7 +4098,7 @@ const serviceDashboardYearlyCosts = useMemo(() => {
         .from("vehicle_documents")
         .update({ expiry: inspectionExpiryValue || null })
         .eq("vehicle_id", selectedId)
-        .eq("user_id", session.user.id)
+        .eq("company_id", currentCompanyId)
         .eq("doc_key", "inspection");
 
       if (inspectionExpiryError) {
@@ -2614,6 +4112,8 @@ const serviceDashboardYearlyCosts = useMemo(() => {
           v.id === selectedId
             ? {
                 ...v,
+                brand: String(vehicleDetailsForm.brand || "").trim(),
+                model: String(vehicleDetailsForm.model || "").trim(),
                 name: vehicleDetailsForm.name.trim(),
                 plate: vehicleDetailsForm.plate.toUpperCase().trim(),
                 driver: resolvedDriverName,
@@ -2632,6 +4132,7 @@ const serviceDashboardYearlyCosts = useMemo(() => {
                   vehicleDetailsForm.timingBeltIntervalKm === ""
                     ? ""
                     : Number(vehicleDetailsForm.timingBeltIntervalKm),
+                status: vehiclePayload.status ?? v.status,
               }
             : v
         )
@@ -2670,8 +4171,11 @@ const serviceDashboardYearlyCosts = useMemo(() => {
     const ownerState = getOwnerModeAndCustom(selectedVehicle.driver, ownerOptions);
 
     setVehicleDetailsForm({
+      brand: selectedVehicle.brand || "",
+      model: selectedVehicle.model || "",
       name: selectedVehicle.name || "",
       plate: selectedVehicle.plate || "",
+      status: selectedVehicle.lifecycleStatus || "active",
       ownerMode: ownerState.ownerMode,
       customOwner: ownerState.customOwner,
       note: selectedVehicle.note || "",
@@ -2699,8 +4203,11 @@ const serviceDashboardYearlyCosts = useMemo(() => {
     const ownerState = getOwnerModeAndCustom(selectedVehicle.driver, ownerOptions);
 
     setVehicleDetailsForm({
+      brand: selectedVehicle.brand || "",
+      model: selectedVehicle.model || "",
       name: selectedVehicle.name || "",
       plate: selectedVehicle.plate || "",
+      status: selectedVehicle.lifecycleStatus || "active",
       ownerMode: ownerState.ownerMode,
       customOwner: ownerState.customOwner,
       note: selectedVehicle.note || "",
@@ -2854,6 +4361,8 @@ const serviceDashboardYearlyCosts = useMemo(() => {
 
 const handleDriverKmSave = async () => {
   if (!session?.user?.id || !currentDriver?.id || !selectedDriverVehicle?.id) return;
+  if (driverRequestLocksRef.current.driverKmSave) return;
+  driverRequestLocksRef.current.driverKmSave = true;
 
   const targetVehicleId = selectedDriverVehicle.id;
 
@@ -2862,12 +4371,14 @@ const handleDriverKmSave = async () => {
 
   if (trimmed === "" || Number.isNaN(newKm)) {
     showToast("Érvényes km megadása kötelező", "error");
+    driverRequestLocksRef.current.driverKmSave = false;
     return;
   }
 
   const currentKm = Number(selectedDriverVehicle.currentKm || 0);
   if (newKm < currentKm) {
     showToast(`Az új km nem lehet kisebb a jelenleginél (${formatKmHu(currentKm)} km)`, "error");
+    driverRequestLocksRef.current.driverKmSave = false;
     return;
   }
 
@@ -2894,6 +4405,15 @@ const handleDriverKmSave = async () => {
 
     if (kmInsertError) {
       console.error("km_logs insert error (driver):", serializeSupabaseError(kmInsertError), kmInsertError);
+      if (shouldQueueDueToConnectivity(kmInsertError)) {
+        enqueueDriverOutboxItem({
+          type: "km_save",
+          payload: { vehicleId: targetVehicleId, newKm, note: "" },
+        });
+        refreshDriverOutboxCount();
+        showToast("Gyenge hálózat: a km mentés függőbe került, később automatikusan beküldjük.", "warning");
+        return;
+      }
       showToast("A km rögzítése nem sikerült", "error");
       return;
     }
@@ -2915,6 +4435,15 @@ const handleDriverKmSave = async () => {
 
     if (vehicleUpdateError) {
       console.error("vehicles update after km_logs (driver):", vehicleUpdateError);
+      if (shouldQueueDueToConnectivity(vehicleUpdateError)) {
+        enqueueDriverOutboxItem({
+          type: "km_save",
+          payload: { vehicleId: targetVehicleId, newKm, note: "" },
+        });
+        refreshDriverOutboxCount();
+        showToast("Gyenge hálózat: a km mentés függőbe került, később automatikusan beküldjük.", "warning");
+        return;
+      }
       showToast("A jármű km adatait nem sikerült frissíteni", "error");
       return;
     }
@@ -2967,19 +4496,121 @@ const handleDriverKmSave = async () => {
     }
 
     setDriverKmDraft("");
+    clearDriverDraft("kmDraft", targetVehicleId);
     showSaved("Km rögzítve");
   } catch (error) {
     console.error("handleDriverKmSave error:", error);
-    showToast("A km rögzítése nem sikerült", "error");
+    if (shouldQueueDueToConnectivity(error)) {
+      enqueueDriverOutboxItem({
+        type: "km_save",
+        payload: { vehicleId: targetVehicleId, newKm, note: "" },
+      });
+      refreshDriverOutboxCount();
+      showToast("Gyenge hálózat: a km mentés függőbe került, később automatikusan beküldjük.", "warning");
+    } else {
+      showToast("A km rögzítése nem sikerült", "error");
+    }
   } finally {
     setDriverKmSaving(false);
+    driverRequestLocksRef.current.driverKmSave = false;
   }
+};
+
+const persistDriverOdometerReading = async ({ vehicleId, newKm, note = "" }) => {
+  if (!session?.user?.id || !currentDriver?.id || !vehicleId) return { ok: false };
+
+  const targetVehicleId = vehicleId;
+  const roundedKm = Math.round(Number(newKm));
+  if (!Number.isFinite(roundedKm) || roundedKm < 0) return { ok: false };
+
+  const insertPayload = {
+    user_id: session.user.id,
+    vehicle_id: targetVehicleId,
+    entry_date: todayIso(),
+    km: roundedKm,
+    note: String(note || ""),
+    driver_id: currentDriver.id,
+    source: "driver",
+  };
+
+  const { data: insertedKmRows, error: kmInsertError } = await supabase
+    .from("km_logs")
+    .insert(insertPayload)
+    .select("*")
+    .limit(1);
+
+  if (kmInsertError) {
+    console.error("km_logs insert error (driver journey km sync):", serializeSupabaseError(kmInsertError), kmInsertError);
+    return { ok: false, error: kmInsertError };
+  }
+
+  const insertedRow = insertedKmRows?.[0];
+  const newEntry = insertedRow
+    ? mapSupabaseKmRow(insertedRow)
+    : mapSupabaseKmRow({
+        id: `local-${Date.now()}`,
+        entry_date: insertPayload.entry_date,
+        km: roundedKm,
+        note: insertPayload.note,
+      });
+
+  const { error: vehicleUpdateError } = await supabase.from("vehicles").update({ currentKm: roundedKm }).eq("id", targetVehicleId);
+
+  if (vehicleUpdateError) {
+    console.error("vehicles update after km_logs (driver journey km sync):", vehicleUpdateError);
+    return { ok: false, error: vehicleUpdateError };
+  }
+
+  const { data: freshVehicle, error: freshVehicleError } = await supabase.from("vehicles").select("*").eq("id", targetVehicleId).maybeSingle();
+
+  const { data: kmRows, error: kmRefreshError } = await supabase
+    .from("km_logs")
+    .select("*")
+    .eq("vehicle_id", targetVehicleId)
+    .order("entry_date", { ascending: false });
+
+  const { data: svcRows, error: svcRefreshError } = await supabase
+    .from("service_history")
+    .select("*")
+    .eq("vehicle_id", targetVehicleId)
+    .order("entry_date", { ascending: false });
+
+  if (kmRefreshError) {
+    console.error("km_logs refresh after driver journey km sync:", kmRefreshError);
+  }
+  if (svcRefreshError) {
+    console.error("service_history refresh after driver journey km sync:", svcRefreshError);
+  }
+
+  if (!freshVehicleError && freshVehicle) {
+    const rebuilt = attachHistoryToVehicles([freshVehicle], svcRows || [], kmRows || [])[0];
+    setDriverVehicles((prev) => prev.map((v) => (String(v.id) === String(targetVehicleId) ? rebuilt : v)));
+  } else {
+    setDriverVehicles((prev) =>
+      prev.map((v) => {
+        if (String(v.id) !== String(targetVehicleId)) return v;
+        const history = Array.isArray(v.serviceHistory) ? v.serviceHistory : [];
+        const recalculated = deriveVehicleKmStateFromHistory(v, [newEntry, ...history]);
+        return mergeVehicleHistoryWithBaseline({
+          ...v,
+          currentKm: Number(recalculated.currentKm || roundedKm),
+          lastServiceKm: Number(recalculated.lastServiceKm || v.lastServiceKm || 0),
+          serviceHistory: recalculated.serviceHistory,
+        });
+      })
+    );
+  }
+
+  return { ok: true };
 };
 
 const handleDriverJourneyStart = async () => {
   if (!session?.user?.id || !currentDriver?.id || !selectedDriverVehicle?.id) return;
+  if (driverRequestLocksRef.current.driverJourneyStart) return;
+  driverRequestLocksRef.current.driverJourneyStart = true;
   if (selectedDriverActiveJourney?.id) {
     showToast("Van folyamatban lévő út ennél a járműnél", "error");
+    driverRequestLocksRef.current.driverJourneyStart = false;
     return;
   }
 
@@ -2991,10 +4622,12 @@ const handleDriverJourneyStart = async () => {
 
   if (!startLocation) {
     showToast("Indulási hely megadása kötelező", "error");
+    driverRequestLocksRef.current.driverJourneyStart = false;
     return;
   }
   if (Number.isNaN(startKm) || startKm < 0) {
     showToast("Érvényes induló km megadása kötelező", "error");
+    driverRequestLocksRef.current.driverJourneyStart = false;
     return;
   }
 
@@ -3031,20 +4664,30 @@ const handleDriverJourneyStart = async () => {
       }));
     }
 
+    setDriverJourneyDraft((prev) => ({
+      ...prev,
+      startLocation: "",
+      startKm: "",
+    }));
+    clearDriverDraft("journeyDraft", selectedDriverVehicle.id);
     showSaved("Út elindítva");
   } catch (error) {
     console.error("handleDriverJourneyStart error:", error);
     showToast("Az út indítása nem sikerült", "error");
   } finally {
     setDriverJourneySaving(false);
+    driverRequestLocksRef.current.driverJourneyStart = false;
   }
 };
 
 const handleDriverJourneyStop = async () => {
   if (!session?.user?.id || !currentDriver?.id || !selectedDriverVehicle?.id) return;
+  if (driverRequestLocksRef.current.driverJourneyStop) return;
+  driverRequestLocksRef.current.driverJourneyStop = true;
   const active = selectedDriverActiveJourney;
   if (!active?.id) {
     showToast("Nincs folyamatban lévő út ennél a járműnél", "error");
+    driverRequestLocksRef.current.driverJourneyStop = false;
     return;
   }
 
@@ -3054,16 +4697,19 @@ const handleDriverJourneyStop = async () => {
 
   if (!endLocation) {
     showToast("Érkezési hely megadása kötelező", "error");
+    driverRequestLocksRef.current.driverJourneyStop = false;
     return;
   }
   if (endKmRaw === "" || Number.isNaN(endKm) || endKm < 0) {
     showToast("Érvényes érkező km megadása kötelező", "error");
+    driverRequestLocksRef.current.driverJourneyStop = false;
     return;
   }
 
   const startKm = Number(active.start_km ?? active.startKm ?? 0);
   if (endKm < startKm) {
     showToast(`Az érkező km nem lehet kisebb az indulónál (${formatKmHu(startKm)} km)`, "error");
+    driverRequestLocksRef.current.driverJourneyStop = false;
     return;
   }
 
@@ -3089,26 +4735,31 @@ const handleDriverJourneyStop = async () => {
       return;
     }
 
+    const roundedEndKm = Math.round(endKm);
+    const currentKm = Number(selectedDriverVehicle.currentKm || 0);
+    if (roundedEndKm > currentKm) {
+      const kmSync = await persistDriverOdometerReading({
+        vehicleId: selectedDriverVehicle.id,
+        newKm: roundedEndKm,
+        note: "Út lezárás",
+      });
+      if (!kmSync?.ok) {
+        showToast("Az út lezáródott, de a km rögzítése nem sikerült", "error");
+      }
+    }
+
     setDriverActiveJourneysByVehicle((prev) => {
       const next = { ...prev };
       delete next[String(selectedDriverVehicle.id)];
       return next;
     });
 
-    // Optionally update driver vehicle km in UI for convenience
-    setDriverVehicles((prev) =>
-      prev.map((v) =>
-        String(v.id) === String(selectedDriverVehicle.id)
-          ? { ...v, currentKm: Math.max(Number(v.currentKm || 0), Math.round(endKm)) }
-          : v
-      )
-    );
-
     setDriverJourneyDraft((prev) => ({
       ...prev,
       endLocation: "",
       endKm: "",
     }));
+    clearDriverDraft("journeyDraft", selectedDriverVehicle.id);
 
     showSaved("Út lezárva");
   } catch (error) {
@@ -3116,11 +4767,14 @@ const handleDriverJourneyStop = async () => {
     showToast("Az út lezárása nem sikerült", "error");
   } finally {
     setDriverJourneySaving(false);
+    driverRequestLocksRef.current.driverJourneyStop = false;
   }
 };
 
 const handleDriverExpenseSave = async () => {
   if (!session?.user?.id || !currentDriver?.id || !selectedDriverVehicle?.id) return;
+  if (driverRequestLocksRef.current.driverExpenseSave) return;
+  driverRequestLocksRef.current.driverExpenseSave = true;
 
   const vehicle = selectedDriverVehicle;
   const occurredAt = String(driverExpenseDraft.occurredAt || "").trim();
@@ -3131,6 +4785,7 @@ const handleDriverExpenseSave = async () => {
   const grossAmount = Number(grossRaw);
   if (!grossRaw || Number.isNaN(grossAmount) || grossAmount < 0) {
     showToast("Érvényes bruttó összeg megadása kötelező", "error");
+    driverRequestLocksRef.current.driverExpenseSave = false;
     return;
   }
 
@@ -3142,6 +4797,7 @@ const handleDriverExpenseSave = async () => {
   if (expenseType === "fuel") {
     if (liters == null || Number.isNaN(liters) || liters <= 0) {
       showToast("Tankolásnál a liter megadása kötelező", "error");
+      driverRequestLocksRef.current.driverExpenseSave = false;
       return;
     }
   }
@@ -3150,6 +4806,7 @@ const handleDriverExpenseSave = async () => {
   const odometerKm = odometerRaw === "" ? null : Number(odometerRaw);
   if (odometerKm != null && (Number.isNaN(odometerKm) || odometerKm < 0)) {
     showToast("Érvényes km óraállást adj meg", "error");
+    driverRequestLocksRef.current.driverExpenseSave = false;
     return;
   }
 
@@ -3188,23 +4845,31 @@ const handleDriverExpenseSave = async () => {
       const maxBytes = 8 * 1024 * 1024;
       if (file.size > maxBytes) {
         showToast("A bizonylat túl nagy (max 8 MB)", "error");
+        driverRequestLocksRef.current.driverExpenseSave = false;
         return;
       }
       if (file.type && !allowedTypes.includes(file.type)) {
         showToast("Csak PDF, JPG, PNG vagy WEBP tölthető fel", "error");
+        driverRequestLocksRef.current.driverExpenseSave = false;
         return;
       }
 
       const month = String(payload.occurred_at || "").slice(0, 7) || todayIso().slice(0, 7);
       const storagePath = `${vehicle.user_id}/${vehicle.id}/${month}/${Date.now()}-${sanitizeStorageSegment(file.name)}`;
-      const { error: uploadError } = await supabase.storage.from("expense-receipts").upload(storagePath, file, {
+      const { error: uploadError } = await supabase.storage.from(EXPENSE_RECEIPTS_STORAGE_BUCKET).upload(storagePath, file, {
         cacheControl: "3600",
         upsert: false,
         contentType: file.type || undefined,
       });
       if (uploadError) {
-        console.error("expense-receipts upload error:", uploadError);
-        showToast("A bizonylat feltöltése nem sikerült", "error");
+        if (isSupabaseStorageBucketNotFoundError(uploadError)) {
+          console.warn("expense-receipts upload:", serializeSupabaseError(uploadError));
+          showToast(expenseReceiptBucketMissingUserHint(EXPENSE_RECEIPTS_STORAGE_BUCKET), "error");
+        } else {
+          console.error("expense-receipts upload error:", uploadError);
+          showToast("A bizonylat feltöltése nem sikerült", "error");
+        }
+        driverRequestLocksRef.current.driverExpenseSave = false;
         return;
       }
 
@@ -3221,9 +4886,18 @@ const handleDriverExpenseSave = async () => {
 
     if (error) {
       if (payload.receipt_storage_path) {
-        await supabase.storage.from("expense-receipts").remove([payload.receipt_storage_path]);
+        await supabase.storage.from(EXPENSE_RECEIPTS_STORAGE_BUCKET).remove([payload.receipt_storage_path]);
       }
       console.error("expense_entries insert error:", serializeSupabaseError(error), error);
+      if (!payload.receipt_storage_path && shouldQueueDueToConnectivity(error)) {
+        enqueueDriverOutboxItem({
+          type: "expense_save",
+          payload: { insertPayload: payload },
+        });
+        refreshDriverOutboxCount();
+        showToast("Gyenge hálózat: a költség mentés függőbe került, később automatikusan beküldjük.", "warning");
+        return;
+      }
       showToast("A költség mentése nem sikerült", "error");
       return;
     }
@@ -3254,9 +4928,19 @@ const handleDriverExpenseSave = async () => {
     setDriverExpenseReceiptFile(null);
   } catch (error) {
     console.error("handleDriverExpenseSave error:", error);
-    showToast("A költség mentése nem sikerült", "error");
+    if (!driverExpenseReceiptFile && shouldQueueDueToConnectivity(error)) {
+      enqueueDriverOutboxItem({
+        type: "expense_save",
+        payload: { insertPayload: payload },
+      });
+      refreshDriverOutboxCount();
+      showToast("Gyenge hálózat: a költség mentés függőbe került, később automatikusan beküldjük.", "warning");
+    } else {
+      showToast("A költség mentése nem sikerült", "error");
+    }
   } finally {
     setDriverExpenseSaving(false);
+    driverRequestLocksRef.current.driverExpenseSave = false;
   }
 };
 
@@ -3322,7 +5006,7 @@ const saveDriverExpenseDraft = async (nextStatus) => {
     status: nextStatus,
   };
 
-  setDriverExpenseAiSaving(true);
+  setDriverExpenseSaving(true);
   try {
     const { data, error } = await supabase
       .from("expense_entries")
@@ -3356,12 +5040,23 @@ const saveDriverExpenseDraft = async (nextStatus) => {
     console.error("saveDriverExpenseDraft error:", error);
     showToast("A draft mentése nem sikerült", "error");
   } finally {
-    setDriverExpenseAiSaving(false);
+    setDriverExpenseSaving(false);
   }
 };
 
 const handleDriverExpenseAiProcess = async () => {
-  if (!session?.user?.id || !currentDriver?.id || !selectedDriverVehicle?.id) return;
+  if (!session?.user?.id) {
+    showToast("Bejelentkezés szükséges", "error");
+    return;
+  }
+  if (!currentDriver?.id) {
+    showToast("Ehhez a fiókhoz nincs sofőr profil. Az admin kösse össze a sofőrt ezzel a bejelentkezéssel.", "error");
+    return;
+  }
+  if (!selectedDriverVehicle?.id) {
+    showToast("Válassz járművet a listában az AI kitöltés előtt.", "error");
+    return;
+  }
   const vehicle = selectedDriverVehicle;
   const file = driverExpenseAiFile;
   if (!file) {
@@ -3373,49 +5068,98 @@ const handleDriverExpenseAiProcess = async () => {
   try {
     const month = todayIso().slice(0, 7);
     const storagePath = `${vehicle.user_id}/${vehicle.id}/${month}/${Date.now()}-${sanitizeStorageSegment(file.name)}`;
-    const { error: uploadError } = await supabase.storage.from("expense-receipts").upload(storagePath, file, {
+    const { error: uploadError } = await supabase.storage.from(EXPENSE_RECEIPTS_STORAGE_BUCKET).upload(storagePath, file, {
       cacheControl: "3600",
       upsert: false,
       contentType: file.type || undefined,
     });
     if (uploadError) {
-      console.error("expense-receipts AI upload error:", uploadError);
-      showToast("A bizonylat feltöltése nem sikerült", "error");
+      if (isSupabaseStorageBucketNotFoundError(uploadError)) {
+        console.warn("expense-receipts AI upload:", serializeSupabaseError(uploadError));
+        showToast(expenseReceiptBucketMissingUserHint(EXPENSE_RECEIPTS_STORAGE_BUCKET), "error");
+      } else {
+        console.error("expense-receipts AI upload error:", uploadError);
+        showToast("A bizonylat feltöltése nem sikerült", "error");
+      }
       return;
     }
 
-    const { data: fnData, error: fnError } = await supabase.functions.invoke("process-expense-receipt", {
-      body: {
+    const { data: sessWrap, error: sessErr } = await supabase.auth.getSession();
+    if (sessErr) {
+      console.warn("getSession before AI:", sessErr);
+    }
+    const accessToken = sessWrap?.session?.access_token || session?.access_token;
+    if (!accessToken) {
+      showToast("Bejelentkezés lejárt vagy hiányzik a munkamenet. Jelentkezz be újra.", "error");
+      return;
+    }
+
+    // Same-origin API proxy → avoids browser "Failed to fetch" to *.supabase.co/functions (ad blockers, strict networks).
+    const hint =
+      driverExpenseAiProvider === "openai" || driverExpenseAiProvider === "gemini" || driverExpenseAiProvider === "auto"
+        ? driverExpenseAiProvider
+        : "auto";
+    const fnUrl = `/api/fleet/process-expense-receipt?ai_provider=${encodeURIComponent(hint)}`;
+    const fnRes = await fetch(fnUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({
         receipt_storage_path: storagePath,
         vehicle_id: vehicle.id,
-      },
+        ai_provider: hint,
+      }),
     });
 
-    if (fnError) {
-      console.error("process-expense-receipt invoke error:", fnError);
-      showToast("AI feldolgozás nem sikerült", "error");
+    const fnText = await fnRes.text();
+    let fnData = null;
+    try {
+      fnData = fnText ? JSON.parse(fnText) : null;
+    } catch {
+      fnData = null;
+    }
+
+    if (!fnRes.ok) {
+      const msg = formatProcessExpenseReceiptHttpFailure(fnRes.status, fnData, fnText);
+      console.warn("process-expense-receipt:", fnRes.status, fnText?.slice?.(0, 800));
+      showToast(msg, "error");
       return;
     }
 
-    const entryId = fnData?.entry_id;
-    if (!entryId) {
-      showToast("AI feldolgozás kész, de nem jött vissza bejegyzés", "error");
+    let fnPayload = fnData && typeof fnData === "object" && !Array.isArray(fnData) ? fnData : null;
+    if (!fnPayload && typeof fnData === "string") {
+      try {
+        const parsed = JSON.parse(fnData);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) fnPayload = parsed;
+      } catch {
+        /* ignore */
+      }
+    }
+    if (!fnPayload) {
+      showToast("Váratlan válasz az AI szolgáltatástól. Frissítsd az oldalt és próbáld újra.", "error");
       return;
     }
 
-    const { data: entryRows, error: entryErr } = await supabase
-      .from("expense_entries")
-      .select("*")
-      .eq("id", entryId)
-      .limit(1);
+    const rawEntryId = fnPayload.entry_id ?? fnPayload.entry?.id;
+    const entryId =
+      rawEntryId !== undefined && rawEntryId !== null && String(rawEntryId).trim() !== "" ? String(rawEntryId).trim() : null;
 
-    if (entryErr) {
-      console.error("expense_entries fetch draft error:", entryErr);
-      showToast("A draft betöltése nem sikerült", "error");
-      return;
+    let draft =
+      fnPayload.entry && typeof fnPayload.entry === "object" && !Array.isArray(fnPayload.entry) ? fnPayload.entry : null;
+
+    if (entryId && !draft?.id) {
+      const { data: entryRows, error: entryErr } = await supabase.from("expense_entries").select("*").eq("id", entryId).limit(1);
+
+      if (entryErr) {
+        console.error("expense_entries fetch draft error:", entryErr);
+        showToast("A vázlat betöltése nem sikerült (adatbázis).", "error");
+        return;
+      }
+      draft = entryRows?.[0] || null;
     }
 
-    const draft = entryRows?.[0];
     if (draft?.id) {
       setDriverExpensesByVehicle((prev) => {
         const key = String(vehicle.id);
@@ -3428,7 +5172,18 @@ const handleDriverExpenseAiProcess = async () => {
       openDriverExpenseDraft(draft);
       setDriverExpenseAiFile(null);
       showSaved("AI draft elkészült, ellenőrizd és mentsd");
+      return;
     }
+
+    if (entryId) {
+      showToast(
+        "A bejegyzés elkészülhetett a háttérben, de nem sikerült megjeleníteni. Frissítsd az oldalt, vagy nézd meg a költségek listáját.",
+        "error",
+      );
+      return;
+    }
+
+    showToast("AI feldolgozás kész, de nem jött vissza bejegyzésazonosító.", "error");
   } catch (error) {
     console.error("handleDriverExpenseAiProcess error:", error);
     showToast("AI feldolgozás nem sikerült", "error");
@@ -3678,6 +5433,7 @@ const handleKmUpdate = async () => {
 
     const vehicleInsertPayload = {
       ...buildVehicleDbPayload(form, resolvedDriverName, session.user.id),
+      company_id: currentCompanyId,
       driver_id: form.driverId ? Number(form.driverId) : null,
     };
 
@@ -3717,6 +5473,7 @@ const handleKmUpdate = async () => {
 
       const documentUpserts = Object.entries(docSeed).map(([docKey, doc]) => ({
         user_id: session.user.id,
+        company_id: currentCompanyId,
         vehicle_id: insertedRow.id,
         doc_key: docKey,
         title: doc.title || "",
@@ -3738,6 +5495,93 @@ const handleKmUpdate = async () => {
 
         if (docSeedError) {
           console.error("vehicle_documents seed error:", serializeSupabaseError(docSeedError), docSeedError);
+        }
+      }
+
+      const shouldInsertRegistration =
+        registrationFrontStoragePath && registrationBackStoragePath && registrationFrontFile && registrationBackFile;
+      if (shouldInsertRegistration) {
+        try {
+          // Remove the seeded placeholder "registration" row, then insert 2 actual files (front/back).
+          await supabase
+            .from("vehicle_documents")
+            .delete()
+            .eq("vehicle_id", insertedRow.id)
+            .eq("company_id", currentCompanyId)
+            .eq("doc_key", "registration")
+            .is("storage_path", null);
+
+          const expiryValue = registrationAiExpiry ? registrationAiExpiry : null;
+          const regDocs = [
+            {
+              user_id: session.user.id,
+              company_id: currentCompanyId,
+              vehicle_id: insertedRow.id,
+              doc_key: "registration",
+              title: "Forgalmi (elöl)",
+              uploaded: true,
+              file_name: registrationFrontFile.name || "",
+              file_type: registrationFrontFile.type || "",
+              file_size: Number(registrationFrontFile.size || 0),
+              file_url: "",
+              storage_path: registrationFrontStoragePath,
+              uploaded_at: new Date().toISOString(),
+              expiry: expiryValue,
+              note: "",
+            },
+            {
+              user_id: session.user.id,
+              company_id: currentCompanyId,
+              vehicle_id: insertedRow.id,
+              doc_key: "registration",
+              title: "Forgalmi (hátul)",
+              uploaded: true,
+              file_name: registrationBackFile.name || "",
+              file_type: registrationBackFile.type || "",
+              file_size: Number(registrationBackFile.size || 0),
+              file_url: "",
+              storage_path: registrationBackStoragePath,
+              uploaded_at: new Date().toISOString(),
+              expiry: expiryValue,
+              note: "",
+            },
+          ];
+
+          const { error: regInsertErr } = await supabase.from("vehicle_documents").insert(regDocs);
+          if (regInsertErr) {
+            console.error("vehicle_documents registration insert error:", serializeSupabaseError(regInsertErr), regInsertErr);
+          } else {
+            docSeedCollections.registration = [
+              {
+                id: `reg-front-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                title: "Forgalmi (elöl)",
+                uploaded: true,
+                fileName: registrationFrontFile.name || "",
+                fileType: registrationFrontFile.type || "",
+                fileSize: Number(registrationFrontFile.size || 0),
+                fileDataUrl: "",
+                storagePath: registrationFrontStoragePath,
+                uploadedAt: new Date().toISOString().slice(0, 10),
+                expiry: registrationAiExpiry || "",
+                note: "",
+              },
+              {
+                id: `reg-back-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                title: "Forgalmi (hátul)",
+                uploaded: true,
+                fileName: registrationBackFile.name || "",
+                fileType: registrationBackFile.type || "",
+                fileSize: Number(registrationBackFile.size || 0),
+                fileDataUrl: "",
+                storagePath: registrationBackStoragePath,
+                uploadedAt: new Date().toISOString().slice(0, 10),
+                expiry: registrationAiExpiry || "",
+                note: "",
+              },
+            ];
+          }
+        } catch (e) {
+          console.error("registration docs attach error:", e);
         }
       }
 
@@ -3774,10 +5618,13 @@ const handleKmUpdate = async () => {
       setSelectedId(newVehicle.id);
 
       setForm({
+        brand: "",
+        model: "",
         name: "",
         plate: "",
         currentKm: "",
         lastServiceKm: "",
+        status: "active",
         ownerMode: ownerOptions[0] || CUSTOM_OWNER_VALUE,
         customOwner: "",
         driverId: "",
@@ -3790,6 +5637,12 @@ const handleKmUpdate = async () => {
         oilChangeIntervalKm: "15000",
         timingBeltIntervalKm: "180000",
       });
+
+      setRegistrationFrontFile(null);
+      setRegistrationBackFile(null);
+      setRegistrationFrontStoragePath("");
+      setRegistrationBackStoragePath("");
+      setRegistrationAiExpiry("");
 
       setOpen(false);
       setActivePage("vehicles");
@@ -3809,7 +5662,7 @@ const handleKmUpdate = async () => {
         .from("vehicles")
         .update({ archived: true })
         .eq("id", vehicleToArchive.id)
-        .eq("user_id", session.user.id);
+        .eq("company_id", currentCompanyId);
 
       if (error) {
         console.error("archive vehicle error:", error);
@@ -3836,6 +5689,98 @@ const handleKmUpdate = async () => {
     }
   };
 
+  const uploadSelectedVehicleImage = async (file) => {
+    if (!file || !selectedId) return;
+    if (currentCompanyRole !== "admin") return;
+    if (!currentCompanyId) return;
+
+    setVehicleImageUploading(true);
+    try {
+      const safeName = sanitizeStorageSegment(String(file.name || "vehicle").toLowerCase());
+      const ext = safeName.includes(".") ? safeName.split(".").pop() : "";
+      const base = safeName.replace(/\.[^/.]+$/, "") || "vehicle";
+      const finalName = `${base}-${Date.now()}${ext ? `.${ext}` : ""}`;
+      const objectPath = `${currentCompanyId}/vehicles/${selectedId}/${finalName}`;
+
+      const { error: uploadErr } = await supabase.storage
+        .from("vehicle_images")
+        .upload(objectPath, file, { upsert: true, contentType: file.type || "image/*" });
+      if (uploadErr) {
+        console.error("vehicle image upload error:", serializeSupabaseError(uploadErr), uploadErr);
+        showToast(`Kép feltöltése nem sikerült: ${serializeSupabaseError(uploadErr)}`, "error");
+        return;
+      }
+
+      const { error: updateErr } = await supabase
+        .from("vehicles")
+        .update({ image_path: objectPath })
+        .eq("id", selectedId)
+        .eq("company_id", currentCompanyId);
+      if (updateErr) {
+        console.error("vehicle image_path update error:", serializeSupabaseError(updateErr), updateErr);
+        showToast(`Kép mentése nem sikerült: ${serializeSupabaseError(updateErr)}`, "error");
+        return;
+      }
+
+      setVehicles((prev) =>
+        prev.map((v) => (v.id === selectedId ? { ...v, imagePath: objectPath } : v))
+      );
+      setVehicleDetailsForm((prev) => ({ ...prev, imagePath: objectPath }));
+      showSaved("Kép feltöltve");
+    } catch (e) {
+      console.error("uploadSelectedVehicleImage error:", e);
+      showToast("Kép feltöltése nem sikerült", "error");
+    } finally {
+      setVehicleImageUploading(false);
+    }
+  };
+
+  const deleteSelectedVehicleImage = async () => {
+    if (!selectedId) return;
+    if (currentCompanyRole !== "admin") return;
+    if (!currentCompanyId) return;
+
+    const storagePath =
+      String(vehicleDetailsForm?.imagePath || "").trim() ||
+      String(selectedVehicle?.imagePath || "").trim();
+    if (!storagePath) {
+      showToast("Nincs törölhető kép", "error");
+      return;
+    }
+
+    setVehicleImageUploading(true);
+    try {
+      const { error: storageErr } = await supabase.storage
+        .from("vehicle_images")
+        .remove([storagePath]);
+      if (storageErr) {
+        console.error("vehicle image delete storage error:", serializeSupabaseError(storageErr), storageErr);
+        showToast(`Kép törlése nem sikerült: ${serializeSupabaseError(storageErr)}`, "error");
+        return;
+      }
+
+      const { error: updateErr } = await supabase
+        .from("vehicles")
+        .update({ image_path: null })
+        .eq("id", selectedId)
+        .eq("company_id", currentCompanyId);
+      if (updateErr) {
+        console.error("vehicle image_path null update error:", serializeSupabaseError(updateErr), updateErr);
+        showToast(`Kép törlése nem sikerült: ${serializeSupabaseError(updateErr)}`, "error");
+        return;
+      }
+
+      setVehicles((prev) => prev.map((v) => (v.id === selectedId ? { ...v, imagePath: "" } : v)));
+      setVehicleDetailsForm((prev) => ({ ...prev, imagePath: "" }));
+      showSaved("Kép törölve");
+    } catch (e) {
+      console.error("deleteSelectedVehicleImage error:", e);
+      showToast("Kép törlése nem sikerült", "error");
+    } finally {
+      setVehicleImageUploading(false);
+    }
+  };
+
   const restoreVehicle = async (vehicleId) => {
     if (!session?.user?.id) return;
 
@@ -3844,7 +5789,7 @@ const handleKmUpdate = async () => {
         .from("vehicles")
         .update({ archived: false })
         .eq("id", vehicleId)
-        .eq("user_id", session.user.id);
+        .eq("company_id", currentCompanyId);
 
       if (error) {
         console.error("restore vehicle error:", error);
@@ -4291,6 +6236,70 @@ const handleKmUpdate = async () => {
     );
   }
 
+  if (!currentCompanyId) {
+    const memberships = Array.isArray(companyMemberships) ? companyMemberships : [];
+    return (
+      <div className="min-h-screen text-slate-50">
+        <div className="mx-auto flex min-h-screen max-w-lg items-center justify-center px-6">
+          <div className="w-full rounded-3xl border border-white/10 bg-slate-950/70 p-8 shadow-2xl backdrop-blur">
+            <div className="mb-2 text-sm text-cyan-300">Company kiválasztás</div>
+            <h1 className="text-3xl font-bold text-white">Válassz céget</h1>
+            <p className="mt-3 text-sm text-slate-400">
+              Több céghez tartozol, ezért a folytatáshoz ki kell választanod, melyik cég adatait szeretnéd kezelni.
+            </p>
+
+            <div className="mt-6 space-y-4">
+              <div className="space-y-2">
+                <Label>Cég</Label>
+                <Select
+                  onValueChange={(v) => switchCompany(v)}
+                  disabled={companySwitching || memberships.length === 0}
+                >
+                  <SelectTrigger className="fleet-input rounded-2xl">
+                    <SelectValue placeholder={memberships.length > 0 ? "Válassz..." : "Nincs elérhető cég"} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {memberships.map((m) => {
+                      const id = String(m.company_id || "").trim();
+                      if (!id) return null;
+                      const label = (m.name && String(m.name).trim() !== "" ? m.name : id).trim();
+                      return (
+                        <SelectItem key={id} value={id}>
+                          {label} {m.role ? `(${m.role})` : ""}
+                        </SelectItem>
+                      );
+                    })}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="rounded-2xl"
+                  onClick={() => loadCompanyMemberships(session)}
+                  disabled={companySwitching}
+                >
+                  Lista frissítése
+                </Button>
+                <Button type="button" variant="ghost" className="rounded-2xl" onClick={handleSignOut}>
+                  Kilépés
+                </Button>
+              </div>
+
+              {initializationError ? (
+                <div className="rounded-2xl border border-red-400/25 bg-red-400/10 px-4 py-3 text-sm text-red-100">
+                  {initializationError}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (isDriver) {
     return (
       <>
@@ -4326,6 +6335,16 @@ const handleKmUpdate = async () => {
           onOpenExpense={openDriverExpenseDraft}
           aiFile={driverExpenseAiFile}
           onAiFileChange={setDriverExpenseAiFile}
+          aiProvider={driverExpenseAiProvider}
+          onAiProviderChange={(v) => {
+            const next = v === "openai" || v === "gemini" || v === "auto" ? v : "auto";
+            setDriverExpenseAiProvider(next);
+            try {
+              window.localStorage.setItem("fleet_expense_ai_provider", next);
+            } catch {
+              /* ignore */
+            }
+          }}
           onRunAi={handleDriverExpenseAiProcess}
           aiSaving={driverExpenseAiSaving}
           onSubmitExpense={handleDriverExpenseSave}
@@ -4334,6 +6353,9 @@ const handleKmUpdate = async () => {
           onKmChange={setDriverKmDraft}
           onSubmitKm={handleDriverKmSave}
           saving={driverKmSaving}
+          outboxCount={driverOutboxCountState}
+          outboxProcessing={driverOutboxProcessing}
+          onRetryOutbox={() => processDriverOutboxOnce()}
           onLogout={handleSignOut}
           loadError={initializationError}
         />
@@ -4353,7 +6375,7 @@ const handleKmUpdate = async () => {
                   value={driverExpenseDraftForm.occurredAt}
                   onChange={(e) => setDriverExpenseDraftForm((p) => ({ ...p, occurredAt: e.target.value }))}
                   className="fleet-input rounded-2xl"
-                  disabled={driverExpenseAiSaving}
+                  disabled={driverExpenseAiSaving || driverExpenseSaving}
                 />
               </div>
               <div className="space-y-2">
@@ -4362,7 +6384,7 @@ const handleKmUpdate = async () => {
                   value={driverExpenseDraftForm.expenseType}
                   onChange={(e) => setDriverExpenseDraftForm((p) => ({ ...p, expenseType: e.target.value }))}
                   className="fleet-input rounded-2xl"
-                  disabled={driverExpenseAiSaving}
+                  disabled={driverExpenseAiSaving || driverExpenseSaving}
                 />
               </div>
 
@@ -4372,7 +6394,7 @@ const handleKmUpdate = async () => {
                   value={driverExpenseDraftForm.stationName}
                   onChange={(e) => setDriverExpenseDraftForm((p) => ({ ...p, stationName: e.target.value }))}
                   className="fleet-input rounded-2xl"
-                  disabled={driverExpenseAiSaving}
+                  disabled={driverExpenseAiSaving || driverExpenseSaving}
                 />
               </div>
               <div className="space-y-2">
@@ -4381,7 +6403,7 @@ const handleKmUpdate = async () => {
                   value={driverExpenseDraftForm.stationLocation}
                   onChange={(e) => setDriverExpenseDraftForm((p) => ({ ...p, stationLocation: e.target.value }))}
                   className="fleet-input rounded-2xl"
-                  disabled={driverExpenseAiSaving}
+                  disabled={driverExpenseAiSaving || driverExpenseSaving}
                 />
               </div>
 
@@ -4391,7 +6413,7 @@ const handleKmUpdate = async () => {
                   value={driverExpenseDraftForm.liters}
                   onChange={(e) => setDriverExpenseDraftForm((p) => ({ ...p, liters: e.target.value }))}
                   className="fleet-input rounded-2xl"
-                  disabled={driverExpenseAiSaving}
+                  disabled={driverExpenseAiSaving || driverExpenseSaving}
                 />
               </div>
               <div className="space-y-2">
@@ -4400,7 +6422,7 @@ const handleKmUpdate = async () => {
                   value={driverExpenseDraftForm.unitPrice}
                   onChange={(e) => setDriverExpenseDraftForm((p) => ({ ...p, unitPrice: e.target.value }))}
                   className="fleet-input rounded-2xl"
-                  disabled={driverExpenseAiSaving}
+                  disabled={driverExpenseAiSaving || driverExpenseSaving}
                 />
               </div>
 
@@ -4410,7 +6432,7 @@ const handleKmUpdate = async () => {
                   value={driverExpenseDraftForm.grossAmount}
                   onChange={(e) => setDriverExpenseDraftForm((p) => ({ ...p, grossAmount: e.target.value }))}
                   className="fleet-input rounded-2xl"
-                  disabled={driverExpenseAiSaving}
+                  disabled={driverExpenseAiSaving || driverExpenseSaving}
                 />
               </div>
               <div className="space-y-2">
@@ -4419,7 +6441,7 @@ const handleKmUpdate = async () => {
                   value={driverExpenseDraftForm.currency}
                   onChange={(e) => setDriverExpenseDraftForm((p) => ({ ...p, currency: e.target.value }))}
                   className="fleet-input rounded-2xl"
-                  disabled={driverExpenseAiSaving}
+                  disabled={driverExpenseAiSaving || driverExpenseSaving}
                 />
               </div>
             </div>
@@ -4428,14 +6450,14 @@ const handleKmUpdate = async () => {
               <Button
                 variant="secondary"
                 className="rounded-2xl"
-                disabled={driverExpenseAiSaving}
+                disabled={driverExpenseAiSaving || driverExpenseSaving}
                 onClick={() => saveDriverExpenseDraft("rejected")}
               >
                 Elutasítás
               </Button>
               <Button
                 className="fleet-primary-btn rounded-2xl"
-                disabled={driverExpenseAiSaving}
+                disabled={driverExpenseAiSaving || driverExpenseSaving}
                 onClick={() => saveDriverExpenseDraft("posted")}
               >
                 <Save className="mr-2 h-4 w-4" />
@@ -4444,6 +6466,43 @@ const handleKmUpdate = async () => {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        {toast && (
+          <motion.div
+            key={toast.id}
+            initial={{ opacity: 0, y: 18, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 10 }}
+            className={`fixed bottom-6 right-6 z-[200] flex max-w-[360px] items-start gap-3 rounded-2xl border px-4 py-3 shadow-2xl backdrop-blur ${
+              toast.type === "success"
+                ? "border-emerald-500/30 bg-emerald-500/15 text-emerald-100"
+                : "border-amber-500/30 bg-amber-500/15 text-amber-100"
+            }`}
+          >
+            <div
+              className={`mt-0.5 rounded-full p-1 ${
+                toast.type === "success" ? "bg-emerald-500/20" : "bg-amber-500/20"
+              }`}
+            >
+              {toast.type === "success" ? (
+                <Check className="h-4 w-4" />
+              ) : (
+                <Info className="h-4 w-4" />
+              )}
+            </div>
+
+            <div className="flex-1 text-sm font-medium">{toast.message}</div>
+
+            <button
+              type="button"
+              onClick={() => setToast(null)}
+              className="rounded-full border border-white/10 bg-white/5 p-1 text-slate-100 transition hover:bg-white/10"
+              title="Bezárás"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </motion.div>
+        )}
       </>
     );
   }
@@ -4460,7 +6519,7 @@ const handleKmUpdate = async () => {
 
       {/* Sidebar */}
       <aside
-        className={`fixed left-0 top-0 z-[100] h-screen border-r border-cyan-400/10 bg-slate-950/55 backdrop-blur-xl transition-[transform,width] duration-200 md:sticky md:translate-x-0 ${
+        className={`fleet-sidebar fixed left-0 top-0 z-[100] h-screen transition-[transform,width] duration-200 md:sticky md:translate-x-0 ${
           sidebarCollapsed ? "w-[84px]" : "w-[292px]"
         } ${sidebarOpen ? "translate-x-0" : "-translate-x-full"}`}
       >
@@ -4513,27 +6572,25 @@ const handleKmUpdate = async () => {
             {sidebarCollapsed ? (
               <div className="space-y-2">
                 {[
-                  { key: "home", label: "Home", Icon: HomeIcon },
-                  { key: "vehicles", label: "Gépjárművek", Icon: CarFront },
-                  { key: "documents", label: "Dokumentumok", Icon: FileText },
-                  { key: "service", label: "Szerviz", Icon: Wrench },
-                    { key: "journeys", label: "Útnyilvántartás", Icon: ClipboardList },
-                    { key: "expenses", label: "Költségnapló", Icon: BarChart3 },
-                  { key: "finance", label: "Pénzügyek", Icon: BarChart3 },
-                  { key: "drivers", label: "Sofőrök", Icon: Users },
-                  { key: "partners", label: "Szervizpartnerek", Icon: Handshake },
-                ].map(({ key, label, Icon }) => (
+                  { key: "home", label: "Home", Icon: HomeIcon, tone: "" },
+                  { key: "vehicles", label: "Gépjárművek", Icon: CarFront, tone: "vehicles" },
+                  { key: "documents", label: "Dokumentumok", Icon: FileText, tone: "vehicles" },
+                  { key: "service", label: "Szerviz", Icon: Wrench, tone: "vehicles" },
+                  { key: "journeys", label: "Útnyilvántartás", Icon: ClipboardList, tone: "vehicles" },
+                  { key: "expenses", label: "Költségnapló", Icon: BarChart3, tone: "reports" },
+                  { key: "finance", label: "Pénzügyek", Icon: BarChart3, tone: "reports" },
+                  { key: "drivers", label: "Sofőrök", Icon: Users, tone: "contacts" },
+                  { key: "partners", label: "Szervizpartnerek", Icon: Handshake, tone: "contacts" },
+                ].map(({ key, label, Icon, tone }) => (
                   <button
                     key={key}
                     onClick={() => {
                       setActivePage(key);
                       setSidebarOpen(false);
                     }}
-                    className={`flex w-full items-center justify-center rounded-2xl border p-3 text-slate-200 transition ${
-                      safePage === key
-                        ? "border-cyan-300/30 bg-cyan-300/12 text-cyan-50 shadow-[0_0_24px_rgba(34,211,238,0.12)]"
-                        : "border-white/8 bg-white/5 hover:border-cyan-400/20 hover:bg-white/8 hover:text-white"
-                    }`}
+                    className="fleet-nav-item flex w-full items-center justify-center rounded-2xl p-3"
+                    data-active={safePage === key}
+                    data-tone={tone || undefined}
                     aria-label={label}
                     title={label}
                   >
@@ -4548,11 +6605,8 @@ const handleKmUpdate = async () => {
                     setActivePage("home");
                     setSidebarOpen(false);
                   }}
-                  className={`flex w-full items-center gap-2 rounded-2xl border px-3 py-2 text-left text-sm font-semibold transition ${
-                    safePage === "home"
-                      ? "border-cyan-300/30 bg-cyan-300/12 text-cyan-50 shadow-[0_0_24px_rgba(34,211,238,0.12)]"
-                      : "border-white/8 bg-white/5 text-slate-200 hover:border-cyan-400/20 hover:bg-white/8 hover:text-white"
-                  }`}
+                  className="fleet-nav-item flex w-full items-center gap-2 rounded-2xl px-3 py-2 text-left text-sm font-semibold"
+                  data-active={safePage === "home"}
                 >
                   <HomeIcon className="h-4 w-4" />
                   Home
@@ -4563,7 +6617,7 @@ const handleKmUpdate = async () => {
                     onClick={() =>
                       setSidebarGroupsOpen((prev) => ({ ...prev, vehicles: !prev.vehicles }))
                     }
-                    className="flex w-full items-center justify-between rounded-2xl border border-white/8 bg-white/4 px-3 py-2 text-left text-xs font-semibold uppercase tracking-[0.22em] text-slate-300 transition hover:bg-white/6"
+                    className="fleet-nav-group flex w-full items-center justify-between rounded-2xl px-3 py-2 text-left text-xs font-semibold uppercase tracking-[0.22em]"
                   >
                     <span>Járművek</span>
                     <ChevronRight
@@ -4573,10 +6627,10 @@ const handleKmUpdate = async () => {
                   {sidebarGroupsOpen.vehicles && (
                     <div className="mt-2 space-y-1 pl-1">
                       {[
-                        { key: "vehicles", label: "Gépjárművek" },
-                        { key: "documents", label: "Dokumentumok" },
-                        { key: "service", label: "Szerviz" },
-                        { key: "journeys", label: "Útnyilvántartás" },
+                        { key: "vehicles", label: "Gépjárművek", Icon: CarFront },
+                        { key: "documents", label: "Dokumentumok", Icon: FileText },
+                        { key: "service", label: "Szerviz", Icon: Wrench },
+                        { key: "journeys", label: "Útnyilvántartás", Icon: ClipboardList },
                       ].map((item) => (
                         <button
                           key={item.key}
@@ -4584,13 +6638,14 @@ const handleKmUpdate = async () => {
                             setActivePage(item.key);
                             setSidebarOpen(false);
                           }}
-                          className={`w-full rounded-2xl border px-3 py-2 text-left text-sm transition ${
-                            safePage === item.key
-                              ? "border-cyan-300/22 bg-cyan-300/10 text-cyan-50"
-                              : "border-transparent bg-transparent text-slate-200 hover:border-white/10 hover:bg-white/5"
-                          }`}
+                          className="fleet-nav-item w-full rounded-2xl border px-3 py-2 text-left text-sm"
+                          data-active={safePage === item.key}
+                          data-tone="vehicles"
                         >
-                          {item.label}
+                          <div className="flex items-center gap-2">
+                            <item.Icon className="h-4 w-4" />
+                            {item.label}
+                          </div>
                         </button>
                       ))}
                     </div>
@@ -4602,7 +6657,7 @@ const handleKmUpdate = async () => {
                     onClick={() =>
                       setSidebarGroupsOpen((prev) => ({ ...prev, reports: !prev.reports }))
                     }
-                    className="flex w-full items-center justify-between rounded-2xl border border-white/8 bg-white/4 px-3 py-2 text-left text-xs font-semibold uppercase tracking-[0.22em] text-slate-300 transition hover:bg-white/6"
+                    className="fleet-nav-group flex w-full items-center justify-between rounded-2xl px-3 py-2 text-left text-xs font-semibold uppercase tracking-[0.22em]"
                   >
                     <span>Kimutatások</span>
                     <ChevronRight
@@ -4616,26 +6671,28 @@ const handleKmUpdate = async () => {
                           setActivePage("expenses");
                           setSidebarOpen(false);
                         }}
-                        className={`w-full rounded-2xl border px-3 py-2 text-left text-sm transition ${
-                          safePage === "expenses"
-                            ? "border-cyan-300/22 bg-cyan-300/10 text-cyan-50"
-                            : "border-transparent bg-transparent text-slate-200 hover:border-white/10 hover:bg-white/5"
-                        }`}
+                        className="fleet-nav-item w-full rounded-2xl border px-3 py-2 text-left text-sm"
+                        data-active={safePage === "expenses"}
+                        data-tone="reports"
                       >
-                        Költségnapló
+                        <div className="flex items-center gap-2">
+                          <BarChart3 className="h-4 w-4" />
+                          Költségnapló
+                        </div>
                       </button>
                       <button
                         onClick={() => {
                           setActivePage("finance");
                           setSidebarOpen(false);
                         }}
-                        className={`w-full rounded-2xl border px-3 py-2 text-left text-sm transition ${
-                          safePage === "finance"
-                            ? "border-cyan-300/22 bg-cyan-300/10 text-cyan-50"
-                            : "border-transparent bg-transparent text-slate-200 hover:border-white/10 hover:bg-white/5"
-                        }`}
+                        className="fleet-nav-item w-full rounded-2xl border px-3 py-2 text-left text-sm"
+                        data-active={safePage === "finance"}
+                        data-tone="reports"
                       >
-                        Pénzügyek
+                        <div className="flex items-center gap-2">
+                          <BarChart3 className="h-4 w-4" />
+                          Pénzügyek
+                        </div>
                       </button>
                     </div>
                   )}
@@ -4646,7 +6703,7 @@ const handleKmUpdate = async () => {
                     onClick={() =>
                       setSidebarGroupsOpen((prev) => ({ ...prev, contacts: !prev.contacts }))
                     }
-                    className="flex w-full items-center justify-between rounded-2xl border border-white/8 bg-white/4 px-3 py-2 text-left text-xs font-semibold uppercase tracking-[0.22em] text-slate-300 transition hover:bg-white/6"
+                    className="fleet-nav-group flex w-full items-center justify-between rounded-2xl px-3 py-2 text-left text-xs font-semibold uppercase tracking-[0.22em]"
                   >
                     <span>Kapcsolatok</span>
                     <ChevronRight
@@ -4656,8 +6713,8 @@ const handleKmUpdate = async () => {
                   {sidebarGroupsOpen.contacts && (
                     <div className="mt-2 space-y-1 pl-1">
                       {[
-                        { key: "drivers", label: "Sofőrök" },
-                        { key: "partners", label: "Szervizpartnerek" },
+                        { key: "drivers", label: "Sofőrök", Icon: Users },
+                        { key: "partners", label: "Szervizpartnerek", Icon: Handshake },
                       ].map((item) => (
                         <button
                           key={item.key}
@@ -4665,13 +6722,14 @@ const handleKmUpdate = async () => {
                             setActivePage(item.key);
                             setSidebarOpen(false);
                           }}
-                          className={`w-full rounded-2xl border px-3 py-2 text-left text-sm transition ${
-                            safePage === item.key
-                              ? "border-cyan-300/22 bg-cyan-300/10 text-cyan-50"
-                              : "border-transparent bg-transparent text-slate-200 hover:border-white/10 hover:bg-white/5"
-                          }`}
+                          className="fleet-nav-item w-full rounded-2xl border px-3 py-2 text-left text-sm"
+                          data-active={safePage === item.key}
+                          data-tone="contacts"
                         >
-                          {item.label}
+                          <div className="flex items-center gap-2">
+                            <item.Icon className="h-4 w-4" />
+                            {item.label}
+                          </div>
                         </button>
                       ))}
                     </div>
@@ -4686,7 +6744,7 @@ const handleKmUpdate = async () => {
       {/* Main */}
       <div className="min-w-0 flex-1 w-full">
         {/* Mobile top strip */}
-        <div className="sticky top-0 z-[80] border-b border-cyan-400/10 bg-slate-950/55 px-4 py-3 backdrop-blur-xl md:hidden">
+        <div className="sticky top-0 z-[80] border-b border-white/10 bg-background/70 px-4 py-3 backdrop-blur-xl md:hidden">
           <div className="flex items-center justify-between gap-3">
             <button
               className="rounded-2xl border border-white/10 bg-white/5 p-2 text-slate-200 hover:bg-white/10"
@@ -4730,6 +6788,27 @@ const handleKmUpdate = async () => {
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
+            {Array.isArray(companyMemberships) && companyMemberships.length > 0 ? (
+              <div className="flex items-center gap-2">
+                <div className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">Company</div>
+                <Select
+                  value={currentCompanyId || ""}
+                  onValueChange={(v) => switchCompany(v)}
+                  disabled={companySwitching}
+                >
+                  <SelectTrigger className="fleet-topbar-chip h-9 rounded-full px-4">
+                    <SelectValue placeholder="Válassz céget" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {companyMemberships.map((m) => (
+                      <SelectItem key={`company-${m.company_id}`} value={String(m.company_id)}>
+                        {m.name ? `${m.name} (${m.role})` : `${m.company_id.slice(0, 8)}… (${m.role})`}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            ) : null}
             <div className="relative" ref={notificationRef}>
               {unreadNotificationsCount > 0 && (
                 <span className="pointer-events-none absolute -left-2 -top-2 z-10 flex h-6 min-w-[24px] items-center justify-center rounded-full bg-red-600 px-1 text-xs font-bold text-white">
@@ -4737,8 +6816,10 @@ const handleKmUpdate = async () => {
                 </span>
               )}
               <Button
-                className="fleet-primary-btn rounded-2xl"
+                variant="outline"
+                className="fleet-topbar-chip px-4"
                 onClick={() => setNotificationOpen((prev) => !prev)}
+                data-active={notificationOpen}
               >
                 <Bell className="mr-2 h-4 w-4" />
                 Értesítések
@@ -4833,19 +6914,14 @@ const handleKmUpdate = async () => {
               )}
             </div>
 
-            <Button className="fleet-primary-btn rounded-2xl" onClick={() => setExportOpen(true)}>
+            <Button variant="outline" className="fleet-topbar-chip px-4" onClick={() => setExportOpen(true)}>
               <Download className="mr-2 h-4 w-4" />
               Export
             </Button>
 
-            {safePage === "vehicles" && (
-              <Button className="fleet-primary-btn rounded-2xl" onClick={() => setOpen(true)}>
-                <Plus className="mr-2 h-4 w-4" />
-                Új autó
-              </Button>
-            )}
+            {/* Vehicles page has its own header action */}
 
-            <Button className="fleet-primary-btn rounded-2xl" onClick={handleSignOut}>
+            <Button variant="outline" className="fleet-topbar-chip px-4" onClick={handleSignOut}>
               <X className="mr-2 h-4 w-4" />
               Kilépés
             </Button>
@@ -4923,22 +6999,22 @@ const handleKmUpdate = async () => {
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ delay: idx * 0.05 }}
                 >
-                  <Card className="fleet-card fleet-stat-card rounded-3xl">
+                  <Card
+                    className={`fleet-card fleet-stat-card fleet-tint rounded-3xl ${
+                      ["fleet-tint-blue", "fleet-tint-emerald", "fleet-tint-amber", "fleet-tint-blue"][idx] ||
+                      "fleet-tint-blue"
+                    }`}
+                  >
                     <CardHeader className="pb-3">
                       <div className="flex items-center justify-between">
                         <CardDescription className="text-slate-400">{card.title}</CardDescription>
-                        <div className="rounded-2xl border border-cyan-400/20 bg-cyan-400/10 p-2 shadow-[0_0_18px_rgba(34,211,238,0.14)]">
+                        <div className="fleet-stat-icon rounded-2xl p-2">
                           <card.icon className="h-4 w-4 text-slate-200" />
                         </div>
                       </div>
 
                       <CardTitle className="text-3xl font-bold">
-                        <span
-                          className="inline-block bg-gradient-to-r from-cyan-300 via-sky-400 to-violet-300 bg-clip-text text-transparent"
-                          style={{ WebkitBackgroundClip: "text" }}
-                        >
-                          {card.value}
-                        </span>
+                        <span className="fleet-stat-value inline-block">{card.value}</span>
                       </CardTitle>
                     </CardHeader>
                     <CardContent className="pt-0 text-sm text-slate-400">{card.desc}</CardContent>
@@ -4951,27 +7027,19 @@ const handleKmUpdate = async () => {
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: 0.22 }}
               >
-                <Card className="fleet-card fleet-stat-card fleet-health-card flex flex-col rounded-3xl">
+                <Card className="fleet-card fleet-stat-card fleet-health-card fleet-tint fleet-tint-blue flex flex-col rounded-3xl">
                   <CardHeader className="flex flex-row items-center justify-between pb-1">
                     <CardTitle className="text-sm font-medium text-slate-300">
                       Fleet Health Score
                     </CardTitle>
 
-                    <div className="flex h-8 w-8 items-center justify-center rounded-full border border-violet-400/30 bg-violet-500/10 text-violet-300">
+                    <div className="fleet-stat-icon flex h-8 w-8 items-center justify-center rounded-full text-slate-200">
                       <Activity className="h-4 w-4" />
                     </div>
                   </CardHeader>
 
                   <CardContent className="flex flex-1 items-start justify-center px-4 pb-3 pt-1">
                     <div className="relative -mt-3 flex h-20 w-20 items-center justify-center">
-                      <div
-                        className="absolute inset-[12px] rounded-full"
-                        style={{
-                          background:
-                            "radial-gradient(circle, rgba(139,92,246,0.20), transparent 68%)",
-                          filter: "blur(12px)",
-                        }}
-                      />
 
                       <svg
                         className="absolute inset-0 h-20 w-20 -rotate-90"
@@ -5023,7 +7091,7 @@ const handleKmUpdate = async () => {
                         animate={{ scale: 1, opacity: 1 }}
                         transition={{ duration: 0.8, ease: "easeOut" }}
                       >
-                        <span className="bg-gradient-to-br from-cyan-200 via-cyan-300 to-violet-300 bg-clip-text text-2xl font-bold text-transparent">
+                        <span className="bg-gradient-to-br from-cyan-200 via-sky-300 to-cyan-100 bg-clip-text text-2xl font-bold text-transparent">
                           {fleetHealthScore.value}%
                         </span>
                       </motion.div>
@@ -5113,9 +7181,9 @@ const handleKmUpdate = async () => {
                   </ResponsiveContainer>
                 </div>
 
-                <div className="rounded-3xl border border-violet-400/12 bg-slate-950/40 p-5">
+                <div className="rounded-3xl border border-cyan-400/12 bg-slate-950/40 p-5">
                   <div className="mb-3 flex items-start justify-between gap-3">
-                    <div className="text-xs uppercase tracking-[0.22em] text-violet-200/80">
+                    <div className="text-xs uppercase tracking-[0.22em] text-cyan-200/80">
                       Trend összegzés
                     </div>
 
@@ -5157,7 +7225,7 @@ const handleKmUpdate = async () => {
               </CardContent>
             </Card>
 
-            <Card className="fleet-card mb-6 rounded-3xl border border-violet-400/12">
+            <Card className="fleet-card mb-6 rounded-3xl border border-cyan-400/12">
               <CardHeader>
                 <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                   <div>
@@ -5190,8 +7258,8 @@ const handleKmUpdate = async () => {
                     <div className="mt-2 text-sm text-slate-300">Olajcsere vagy vezérlés a figyelmeztetési ablakban.</div>
                   </div>
 
-                  <div className="rounded-3xl border border-violet-400/20 bg-violet-500/8 p-4">
-                    <div className="mb-2 text-xs uppercase tracking-[0.22em] text-violet-200/80">Lejáratok</div>
+                  <div className="rounded-3xl border border-sky-400/20 bg-sky-500/8 p-4">
+                    <div className="mb-2 text-xs uppercase tracking-[0.22em] text-sky-200/80">Lejáratok</div>
                     <div className="text-3xl font-bold text-white">{prioritySummary.legalCount}</div>
                     <div className="mt-2 text-sm text-slate-300">Biztosítás vagy műszaki utánkövetés.</div>
                   </div>
@@ -5383,7 +7451,7 @@ const handleKmUpdate = async () => {
                         className="flex items-center justify-between rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-3"
                       >
                         <span className="font-medium text-white">{item.year}</span>
-                        <span className="font-semibold text-violet-200">
+                        <span className="font-semibold text-cyan-200">
                           {formatCurrencyHu(item.total)}
                         </span>
                       </div>
@@ -5404,6 +7472,130 @@ const handleKmUpdate = async () => {
 
         {safePage === "vehicles" && (
           <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+              <div>
+                <div className="text-sm text-slate-400">Járművek</div>
+                <h2 className="text-2xl font-bold text-white">Gépjárművek</h2>
+                <div className="mt-1 text-sm text-slate-400">
+                  {vehiclesForCards.length} jármű a szűrésben • {activeVehicles.length} aktív (nem archivált)
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                <Input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Keresés név vagy rendszám..."
+                  className="fleet-input h-11 rounded-2xl sm:w-[280px]"
+                />
+
+                <Button className="fleet-primary-btn h-11 rounded-2xl px-5" onClick={() => setOpen(true)}>
+                  <Plus className="mr-2 h-4 w-4" />
+                  Új autó
+                </Button>
+
+                <Select value={vehicleLifecycleFilter} onValueChange={(v) => setVehicleLifecycleFilter(v)}>
+                  <SelectTrigger className="fleet-input h-11 rounded-2xl sm:w-[220px]">
+                    <SelectValue placeholder="Szűrés" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">Összes (nem archivált)</SelectItem>
+                    <SelectItem value="active">Aktív</SelectItem>
+                    <SelectItem value="service">Szerviz alatt</SelectItem>
+                    <SelectItem value="inactive">Inaktív</SelectItem>
+                    <SelectItem value="archived">Archivált</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {vehiclesForCards.map((vehicle) => {
+                const lifecycle = String(vehicle.archived ? "archived" : vehicle.lifecycleStatus || "active");
+                const badge =
+                  lifecycle === "archived"
+                    ? { label: "Archivált", tone: "neutral" }
+                    : lifecycle === "service"
+                      ? { label: "Szerviz alatt", tone: "warn" }
+                      : lifecycle === "inactive"
+                        ? { label: "Inaktív", tone: "neutral" }
+                        : { label: "Aktív", tone: "ok" };
+
+                return (
+                  <button
+                    key={vehicle.id}
+                    onClick={() => {
+                      setSelectedId(vehicle.id);
+                      setVehicleModalOpen(true);
+                      setIsVehicleDetailsEditing(false);
+                    }}
+                    className={`fleet-card fleet-tint group relative overflow-hidden rounded-3xl text-left transition ${
+                      lifecycle === "service"
+                        ? "fleet-tint-amber"
+                        : lifecycle === "inactive"
+                          ? "fleet-tint-blue"
+                          : lifecycle === "archived"
+                            ? "fleet-tint-blue"
+                            : "fleet-tint-emerald"
+                    }`}
+                  >
+                    <div className="relative">
+                      <div className="h-32 w-full bg-slate-900/50">
+                        {vehicleImageUrlById[String(vehicle.id)] ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={vehicleImageUrlById[String(vehicle.id)]}
+                            alt={vehicle.name || "Jármű"}
+                            className="block h-32 w-full object-cover"
+                          />
+                        ) : (
+                          <div className="flex h-32 items-center justify-center text-xs text-slate-400">Nincs kép</div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="p-4">
+                      <div className="text-[0.95rem] font-semibold tracking-tight text-foreground">
+                        {[vehicle.brand, vehicle.model].filter(Boolean).join(" ") || vehicle.name}
+                      </div>
+                      {vehicle.brand || vehicle.model ? (
+                        vehicle.name && vehicle.name !== [vehicle.brand, vehicle.model].filter(Boolean).join(" ") ? (
+                          <div className="mt-0.5 text-xs text-slate-400">{vehicle.name}</div>
+                        ) : null
+                      ) : null}
+                      <div className="mt-1 text-sm text-muted-foreground">{vehicle.plate}</div>
+
+                      <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+                        <div>
+                          <div className="text-xs text-muted-foreground">Üzemanyag</div>
+                          <div className="font-medium text-foreground">{vehicle.fuelType || "—"}</div>
+                        </div>
+                        <div>
+                          <div className="text-xs text-muted-foreground">Km</div>
+                          <div className="font-medium text-foreground">{formatKmHu(vehicle.currentKm)}</div>
+                        </div>
+                        <div className="col-span-2">
+                          <div className="text-xs text-muted-foreground">Sofőr</div>
+                          <div className="font-medium text-foreground">{vehicle.driver || "Nincs sofőr"}</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="fleet-status-pill absolute bottom-3 right-3" data-tone={badge.tone}>
+                      {badge.label}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            {vehiclesForCards.length === 0 ? (
+              <div className="fleet-card rounded-3xl p-6 text-sm text-muted-foreground">
+                Nincs találat a megadott szűrőkkel.
+              </div>
+            ) : null}
+
+            <div className="hidden">
             <div className="grid gap-6 xl:grid-cols-2">
               <Card className="fleet-card rounded-3xl">
                 <CardHeader>
@@ -5496,29 +7688,105 @@ const handleKmUpdate = async () => {
                 </CardHeader>
 
                 <CardContent className="space-y-3">
-                  {enrichedVehicles.map((vehicle) => (
-                    <button
-                      key={vehicle.id}
-                      onClick={() => setSelectedId(vehicle.id)}
-                      className={`w-full rounded-3xl border p-4 text-left transition ${
-                        selectedVehicle?.id === vehicle.id
-                          ? "border-slate-300/30 bg-white/10"
-                          : "border-white/10 bg-slate-900/40 hover:bg-white/5"
-                      }`}
-                    >
-                      <div className="font-semibold">{vehicle.name}</div>
-                      <div className="mt-1 text-sm text-slate-400">{vehicle.plate}</div>
-                    </button>
-                  ))}
+                  <div className="space-y-3">
+                    <Input
+                      value={query}
+                      onChange={(e) => setQuery(e.target.value)}
+                      placeholder="Keresés név vagy rendszám..."
+                      className="fleet-input rounded-2xl"
+                    />
 
-                  {enrichedVehicles.length === 0 && (
+                    <Select value={vehicleLifecycleFilter} onValueChange={(v) => setVehicleLifecycleFilter(v)}>
+                      <SelectTrigger className="fleet-input rounded-2xl">
+                        <SelectValue placeholder="Szűrés" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">Összes (nem archivált)</SelectItem>
+                        <SelectItem value="active">Aktív</SelectItem>
+                        <SelectItem value="service">Szerviz alatt</SelectItem>
+                        <SelectItem value="inactive">Inaktív</SelectItem>
+                        <SelectItem value="archived">Archivált</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    {vehiclesForCards.map((vehicle) => {
+                      const lifecycle = String(vehicle.archived ? "archived" : vehicle.status || "active");
+                      const badge =
+                        lifecycle === "archived"
+                          ? { label: "Archivált", cls: "border-slate-400/25 bg-slate-400/10 text-slate-100" }
+                          : lifecycle === "service"
+                            ? { label: "Szerviz alatt", cls: "border-amber-400/25 bg-amber-400/10 text-amber-100" }
+                            : lifecycle === "inactive"
+                              ? { label: "Inaktív", cls: "border-slate-400/25 bg-slate-900/40 text-slate-200" }
+                              : { label: "Aktív", cls: "border-emerald-400/25 bg-emerald-400/10 text-emerald-100" };
+
+                      return (
+                        <button
+                          key={vehicle.id}
+                          onClick={() => {
+                            setSelectedId(vehicle.id);
+                            setVehicleModalOpen(true);
+                            setIsVehicleDetailsEditing(false);
+                          }}
+                          className={`rounded-3xl border p-4 text-left transition ${
+                            selectedVehicle?.id === vehicle.id
+                              ? "border-slate-300/30 bg-white/10"
+                              : "border-white/10 bg-slate-900/40 hover:bg-white/5"
+                          }`}
+                        >
+                          <div className="mb-3 overflow-hidden rounded-2xl border border-white/10 bg-slate-900/40">
+                            {vehicleImageUrlById[String(vehicle.id)] ? (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img
+                                src={vehicleImageUrlById[String(vehicle.id)]}
+                                alt={vehicle.name || "Jármű"}
+                                className="block h-28 w-full object-cover"
+                              />
+                            ) : (
+                              <div className="flex h-28 items-center justify-center text-xs text-slate-400">Nincs kép</div>
+                            )}
+                          </div>
+
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <div className="font-semibold text-white">{vehicle.name}</div>
+                              <div className="mt-1 text-sm text-slate-400">{vehicle.plate}</div>
+                            </div>
+                            <div className={`shrink-0 rounded-full border px-2.5 py-1 text-xs font-medium ${badge.cls}`}>
+                              {badge.label}
+                            </div>
+                          </div>
+
+                          <div className="mt-3 space-y-1 text-sm text-slate-300">
+                            <div className="flex items-center justify-between gap-3">
+                              <span className="text-slate-400">Üzemanyag</span>
+                              <span className="font-medium text-slate-200">{vehicle.fuelType || "—"}</span>
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <span className="text-slate-400">Km</span>
+                              <span className="font-medium text-slate-200">{formatKmHu(vehicle.currentKm)}</span>
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <span className="text-slate-400">Sofőr</span>
+                              <span className="font-medium text-slate-200">{vehicle.driver || "Nincs sofőr"}</span>
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {vehiclesForCards.length === 0 && (
                     <div className="rounded-2xl border border-white/10 bg-slate-900/60 px-4 py-3 text-sm text-slate-400">
-                      Nincs aktív jármű. Hozz létre egy újat az &quot;Új autó&quot; gombbal.
+                      Nincs találat a megadott szűrőkkel.
                     </div>
                   )}
                 </CardContent>
               </Card>
 
+              <div className="hidden">
               {selectedVehicle ? (
                 <Card className="fleet-card rounded-3xl">
                   <CardHeader className="border-b border-white/10 pb-5">
@@ -5694,6 +7962,31 @@ const handleKmUpdate = async () => {
                         </Select>
                       </div>
 
+                      {currentCompanyRole === "admin" ? (
+                        <div className="space-y-2">
+                          <Label>Státusz</Label>
+                          <Select
+                            value={vehicleDetailsForm.status}
+                            onValueChange={(value) =>
+                              setVehicleDetailsForm({
+                                ...vehicleDetailsForm,
+                                status: value,
+                              })
+                            }
+                            disabled={!isVehicleDetailsEditing}
+                          >
+                            <SelectTrigger className={lockedInputClass}>
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="active">Aktív</SelectItem>
+                              <SelectItem value="service">Szerviz alatt</SelectItem>
+                              <SelectItem value="inactive">Inaktív</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      ) : null}
+
                       <div className="space-y-2">
                         <Label>Biztosítás lejárat</Label>
                         <Input
@@ -5862,6 +8155,334 @@ const handleKmUpdate = async () => {
                   </CardContent>
                 </Card>
               )}
+              </div>
+
+              <Dialog
+                open={vehicleModalOpen && !!selectedVehicle}
+                onOpenChange={(v) => {
+                  setVehicleModalOpen(v);
+                  if (!v) setIsVehicleDetailsEditing(false);
+                  if (!v) setVehicleShowAllFields(false);
+                }}
+              >
+                <DialogContent className="fleet-dialog sm:max-w-4xl">
+                  <DialogHeader>
+                    <DialogTitle>
+                      {selectedVehicle
+                        ? `${[selectedVehicle.brand, selectedVehicle.model].filter(Boolean).join(" ") || selectedVehicle.name} · ${
+                            selectedVehicle.plate
+                          }`
+                        : "Jármű"}
+                    </DialogTitle>
+                    <DialogDescription>Részletek és szerkesztés</DialogDescription>
+                  </DialogHeader>
+
+                  {selectedVehicle ? (
+                    <div className="space-y-6">
+                      <div className="grid gap-6 md:grid-cols-[240px_minmax(0,1fr)]">
+                        <div className="space-y-3">
+                          <div className="overflow-hidden rounded-3xl border border-white/10 bg-slate-900/40">
+                            {vehicleImageUrlById[String(selectedVehicle.id)] ? (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img
+                                src={vehicleImageUrlById[String(selectedVehicle.id)]}
+                                alt={selectedVehicle.name || "Jármű"}
+                                className="block h-40 w-full object-cover"
+                              />
+                            ) : (
+                              <div className="flex h-40 w-full items-center justify-center bg-slate-900/60 text-slate-400">
+                                Nincs kép
+                              </div>
+                            )}
+                          </div>
+
+                          {currentCompanyRole === "admin" ? (
+                            <div className="space-y-2">
+                              <Label>Kép feltöltése</Label>
+                              <Input
+                                type="file"
+                                accept="image/*"
+                                disabled={vehicleImageUploading}
+                                onChange={(e) => {
+                                  const file = e.target.files?.[0] || null;
+                                  if (file) void uploadSelectedVehicleImage(file);
+                                  try {
+                                    e.target.value = "";
+                                  } catch {
+                                    /* ignore */
+                                  }
+                                }}
+                                className="fleet-input rounded-2xl"
+                              />
+                            </div>
+                          ) : null}
+
+                          {currentCompanyRole === "admin" && vehicleImageUrlById[String(selectedVehicle.id)] ? (
+                            <Button
+                              type="button"
+                              variant="destructive"
+                              className="w-full rounded-2xl"
+                              disabled={vehicleImageUploading}
+                              onClick={deleteSelectedVehicleImage}
+                            >
+                              <Trash2 className="mr-2 h-4 w-4" />
+                              Kép törlése
+                            </Button>
+                          ) : null}
+                        </div>
+
+                        <div className="space-y-4">
+                          <div className="flex flex-wrap gap-3">
+                            {!isVehicleDetailsEditing ? (
+                              <Button variant="secondary" className="rounded-2xl" onClick={startVehicleDetailsEditing}>
+                                <Pencil className="mr-2 h-4 w-4" />
+                                Szerkesztés
+                              </Button>
+                            ) : (
+                              <Button variant="secondary" className="rounded-2xl" onClick={cancelVehicleDetailsEditing}>
+                                <X className="mr-2 h-4 w-4" />
+                                Mégse
+                              </Button>
+                            )}
+
+                            <Button className="rounded-2xl" onClick={saveVehicleDetails} disabled={!isVehicleDetailsEditing}>
+                              <Save className="mr-2 h-4 w-4" />
+                              Mentés
+                            </Button>
+
+                            <Button
+                              variant="secondary"
+                              className="rounded-2xl"
+                              onClick={() => setVehicleShowAllFields((p) => !p)}
+                            >
+                              <FileText className="mr-2 h-4 w-4" />
+                              {vehicleShowAllFields ? "Kevesebb adat" : "Minden adat"}
+                            </Button>
+
+                            <Button variant="secondary" className="rounded-2xl" onClick={() => setVehicleToArchive(selectedVehicle)}>
+                              <Archive className="mr-2 h-4 w-4" />
+                              Archiválás
+                            </Button>
+
+                            <Button variant="secondary" className="rounded-2xl" onClick={() => setVehicleToDelete(selectedVehicle)}>
+                              <Trash2 className="mr-2 h-4 w-4" />
+                              Törlés
+                            </Button>
+                          </div>
+
+                          {!isVehicleDetailsEditing ? (
+                            <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+                              A mezők szerkesztéséhez kattints a Szerkesztés gombra.
+                            </div>
+                          ) : null}
+
+                          <div className="grid gap-4 md:grid-cols-2">
+                            <div className="space-y-2">
+                              <Label>Márka</Label>
+                              <Input
+                                value={vehicleDetailsForm.brand || ""}
+                                disabled={!isVehicleDetailsEditing}
+                                onChange={(e) => setVehicleDetailsForm({ ...vehicleDetailsForm, brand: e.target.value })}
+                                placeholder="pl. Opel"
+                                className={lockedInputClass}
+                              />
+                            </div>
+
+                            <div className="space-y-2">
+                              <Label>Típus</Label>
+                              <Input
+                                value={vehicleDetailsForm.model || ""}
+                                disabled={!isVehicleDetailsEditing}
+                                onChange={(e) => setVehicleDetailsForm({ ...vehicleDetailsForm, model: e.target.value })}
+                                placeholder="pl. Astra"
+                                className={lockedInputClass}
+                              />
+                            </div>
+
+                            <div className="space-y-2">
+                              <Label>Jármű neve</Label>
+                              <Input
+                                value={vehicleDetailsForm.name}
+                                disabled={!isVehicleDetailsEditing}
+                                onChange={(e) => setVehicleDetailsForm({ ...vehicleDetailsForm, name: e.target.value })}
+                                className={lockedInputClass}
+                              />
+                            </div>
+
+                            <div className="space-y-2">
+                              <Label>Rendszám</Label>
+                              <Input
+                                value={vehicleDetailsForm.plate}
+                                disabled={!isVehicleDetailsEditing}
+                                onChange={(e) =>
+                                  setVehicleDetailsForm({ ...vehicleDetailsForm, plate: e.target.value.toUpperCase() })
+                                }
+                                className={lockedInputClass}
+                              />
+                            </div>
+
+                            <div className="space-y-2">
+                              <Label>Sofőr</Label>
+                              <Select
+                                value={vehicleDetailsForm.driverId}
+                                onValueChange={(value) =>
+                                  setVehicleDetailsForm({
+                                    ...vehicleDetailsForm,
+                                    driverId: value === SELECT_NONE_VALUE ? "" : value,
+                                  })
+                                }
+                                disabled={!isVehicleDetailsEditing}
+                              >
+                                <SelectTrigger className={lockedInputClass}>
+                                  <SelectValue placeholder="Válassz sofőrt" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value={SELECT_NONE_VALUE}>Nincs beállítva</SelectItem>
+                                  {drivers
+                                    .filter((d) => d.is_active)
+                                    .map((d) => (
+                                      <SelectItem key={d.id} value={String(d.id)}>
+                                        {d.name}
+                                      </SelectItem>
+                                    ))}
+                                </SelectContent>
+                              </Select>
+                            </div>
+
+                            <div className="space-y-2">
+                              <Label>Évjárat</Label>
+                              <Input
+                                value={vehicleDetailsForm.year}
+                                disabled={!isVehicleDetailsEditing}
+                                onChange={(e) => setVehicleDetailsForm({ ...vehicleDetailsForm, year: e.target.value })}
+                                className={lockedInputClass}
+                              />
+                            </div>
+
+                            {currentCompanyRole === "admin" ? (
+                              <div className="space-y-2">
+                                <Label>Státusz</Label>
+                                <Select
+                                  value={vehicleDetailsForm.status}
+                                  onValueChange={(value) => setVehicleDetailsForm({ ...vehicleDetailsForm, status: value })}
+                                  disabled={!isVehicleDetailsEditing}
+                                >
+                                  <SelectTrigger className={lockedInputClass}>
+                                    <SelectValue />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    <SelectItem value="active">Aktív</SelectItem>
+                                    <SelectItem value="service">Szerviz alatt</SelectItem>
+                                    <SelectItem value="inactive">Inaktív</SelectItem>
+                                  </SelectContent>
+                                </Select>
+                              </div>
+                            ) : null}
+
+                            <div className="space-y-2">
+                              <Label>Üzemanyag</Label>
+                              <Select
+                                value={vehicleDetailsForm.fuelType}
+                                onValueChange={(value) => setVehicleDetailsForm({ ...vehicleDetailsForm, fuelType: value })}
+                                disabled={!isVehicleDetailsEditing}
+                              >
+                                <SelectTrigger className={lockedInputClass}>
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="Benzin">Benzin</SelectItem>
+                                  <SelectItem value="Dízel">Dízel</SelectItem>
+                                  <SelectItem value="Hibrid">Hibrid</SelectItem>
+                                  <SelectItem value="Elektromos">Elektromos</SelectItem>
+                                  <SelectItem value="LPG">LPG</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+
+                            <div className="space-y-2">
+                              <Label>Megjegyzés</Label>
+                              <Input
+                                value={vehicleDetailsForm.note}
+                                disabled={!isVehicleDetailsEditing}
+                                onChange={(e) => setVehicleDetailsForm({ ...vehicleDetailsForm, note: e.target.value })}
+                                className={lockedInputClass}
+                              />
+                            </div>
+
+                            {vehicleShowAllFields ? (
+                              <>
+                                <div className="space-y-2 md:col-span-2">
+                                  <Label>Alvázszám</Label>
+                                  <Input
+                                    value={vehicleDetailsForm.vin}
+                                    disabled={!isVehicleDetailsEditing}
+                                    onChange={(e) =>
+                                      setVehicleDetailsForm({ ...vehicleDetailsForm, vin: e.target.value.toUpperCase() })
+                                    }
+                                    className={lockedInputClass}
+                                  />
+                                </div>
+
+                                <div className="space-y-2">
+                                  <Label>Biztosítás lejárat</Label>
+                                  <Input
+                                    type="date"
+                                    value={vehicleDetailsForm.insuranceExpiry}
+                                    disabled={!isVehicleDetailsEditing}
+                                    onChange={(e) =>
+                                      setVehicleDetailsForm({ ...vehicleDetailsForm, insuranceExpiry: e.target.value })
+                                    }
+                                    className={lockedInputClass}
+                                  />
+                                </div>
+
+                                <div className="space-y-2">
+                                  <Label>Műszaki vizsga lejárat</Label>
+                                  <Input
+                                    type="date"
+                                    value={vehicleDetailsForm.inspectionExpiry}
+                                    disabled={!isVehicleDetailsEditing}
+                                    onChange={(e) =>
+                                      setVehicleDetailsForm({ ...vehicleDetailsForm, inspectionExpiry: e.target.value })
+                                    }
+                                    className={lockedInputClass}
+                                  />
+                                </div>
+
+                                <div className="space-y-2">
+                                  <Label>Olajcsere ciklus (km)</Label>
+                                  <Input
+                                    type="number"
+                                    value={vehicleDetailsForm.oilChangeIntervalKm}
+                                    disabled={!isVehicleDetailsEditing}
+                                    onChange={(e) =>
+                                      setVehicleDetailsForm({ ...vehicleDetailsForm, oilChangeIntervalKm: e.target.value })
+                                    }
+                                    className={lockedInputClass}
+                                  />
+                                </div>
+
+                                <div className="space-y-2">
+                                  <Label>Vezérlés csere ciklus (km)</Label>
+                                  <Input
+                                    type="number"
+                                    value={vehicleDetailsForm.timingBeltIntervalKm}
+                                    disabled={!isVehicleDetailsEditing}
+                                    onChange={(e) =>
+                                      setVehicleDetailsForm({ ...vehicleDetailsForm, timingBeltIntervalKm: e.target.value })
+                                    }
+                                    className={lockedInputClass}
+                                  />
+                                </div>
+                              </>
+                            ) : null}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+                </DialogContent>
+              </Dialog>
             </div>
 
             <Card className="fleet-card rounded-3xl">
@@ -5906,6 +8527,7 @@ const handleKmUpdate = async () => {
                 ))}
               </CardContent>
             </Card>
+            </div>
           </motion.div>
         )}
 
@@ -5954,7 +8576,7 @@ const handleKmUpdate = async () => {
                       </div>
                       <CardTitle className="text-2xl font-bold">
                         <span
-                          className="inline-block bg-gradient-to-r from-cyan-300 via-sky-400 to-violet-300 bg-clip-text text-transparent"
+                          className="inline-block bg-gradient-to-r from-cyan-300 via-sky-400 to-cyan-100 bg-clip-text text-transparent"
                           style={{ WebkitBackgroundClip: "text" }}
                         >
                           {card.value}
@@ -5984,7 +8606,11 @@ const handleKmUpdate = async () => {
                     return (
                       <button
                         key={vehicle.id}
-                        onClick={() => setSelectedId(vehicle.id)}
+                        onClick={() => {
+                          setSelectedId(vehicle.id);
+                          setVehicleModalOpen(true);
+                          setIsVehicleDetailsEditing(false);
+                        }}
                         className={`w-full rounded-3xl border p-4 text-left transition ${
                           selectedVehicle?.id === vehicle.id
                             ? "border-slate-300/30 bg-white/10"
@@ -6129,7 +8755,7 @@ const handleKmUpdate = async () => {
                             <div>
                               <div className="flex items-center justify-between gap-3 text-sm">
                                 <span className="text-slate-400">Vezérlés</span>
-                                <span className="font-semibold text-violet-100">
+                                <span className="font-semibold text-cyan-100">
                                   {selectedVehicleTimingStatus
                                     ? selectedVehicleTimingStatus.remainingKm > 0
                                       ? `${formatKmHu(selectedVehicleTimingStatus.remainingKm)} km van hátra`
@@ -6340,7 +8966,7 @@ const handleKmUpdate = async () => {
                                     ? "border-white/[0.08] bg-slate-950/55 shadow-[inset_0_1px_0_0_rgba(255,255,255,0.04)]"
                                     : isKmUpdate
                                     ? "border-sky-400/20 bg-gradient-to-br from-sky-950/35 via-slate-950/40 to-slate-950/60 shadow-[0_0_24px_-12px_rgba(56,189,248,0.35)]"
-                                    : "border-violet-400/15 bg-gradient-to-br from-violet-950/20 via-slate-950/45 to-slate-950/60 shadow-[0_0_28px_-14px_rgba(167,139,250,0.18)]"
+                                    : "border-cyan-400/15 bg-gradient-to-br from-cyan-950/20 via-slate-950/45 to-slate-950/60 shadow-[0_0_28px_-14px_rgba(34,211,238,0.16)]"
                                 }`}
                               >
                                 <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
@@ -6405,7 +9031,7 @@ const handleKmUpdate = async () => {
                                     </div>
 
                                     {isServiceEvent ? (
-                                      <div className="rounded-full border border-violet-400/20 bg-violet-500/10 px-3 py-1 text-sm font-semibold text-violet-100">
+                                      <div className="rounded-full border border-sky-400/20 bg-sky-500/10 px-3 py-1 text-sm font-semibold text-sky-100">
                                         {formatCurrencyHu(entry.cost)}
                                       </div>
                                     ) : null}
@@ -6528,7 +9154,11 @@ const handleKmUpdate = async () => {
           {enrichedVehicles.map((vehicle) => (
             <button
               key={vehicle.id}
-              onClick={() => setSelectedId(vehicle.id)}
+              onClick={() => {
+                setSelectedId(vehicle.id);
+                setVehicleModalOpen(true);
+                setIsVehicleDetailsEditing(false);
+              }}
               className={`w-full rounded-3xl border p-4 text-left transition ${
                 selectedVehicle?.id === vehicle.id
                   ? "border-slate-300/30 bg-white/10"
@@ -6725,7 +9355,7 @@ const handleKmUpdate = async () => {
                         </div>
                       </div>
                       <CardTitle className="text-2xl font-bold">
-                        <span className="inline-block bg-gradient-to-r from-cyan-300 via-sky-400 to-violet-300 bg-clip-text text-transparent" style={{ WebkitBackgroundClip: "text" }}>
+                        <span className="inline-block bg-gradient-to-r from-cyan-300 via-sky-400 to-cyan-100 bg-clip-text text-transparent" style={{ WebkitBackgroundClip: "text" }}>
                           {card.value}
                         </span>
                       </CardTitle>
@@ -6777,7 +9407,7 @@ const handleKmUpdate = async () => {
                     {serviceDashboardYearlyCosts.map((item) => (
                       <div key={`finance-year-${item.year}`} className="flex items-center justify-between rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-3">
                         <span className="font-medium text-white">{item.year}</span>
-                        <span className="font-semibold text-violet-200">{formatCurrencyHu(item.total)}</span>
+                        <span className="font-semibold text-cyan-200">{formatCurrencyHu(item.total)}</span>
                       </div>
                     ))}
                   </CardContent>
@@ -6873,10 +9503,18 @@ const handleKmUpdate = async () => {
                   <div className="text-sm text-slate-400">
                     Tipp: havi PDF exporthoz válassz járművet + hónapot.
                   </div>
-                  <Button className="fleet-primary-btn rounded-2xl" onClick={exportJourneyPdfMonthly}>
-                    <Download className="mr-2 h-4 w-4" />
-                    PDF export (havi / jármű)
-                  </Button>
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    {!isDriver ? (
+                      <Button variant="secondary" className="rounded-2xl" onClick={openAddJourney}>
+                        <Plus className="mr-2 h-4 w-4" />
+                        Új út
+                      </Button>
+                    ) : null}
+                    <Button className="fleet-primary-btn rounded-2xl" onClick={exportJourneyPdfMonthly}>
+                      <Download className="mr-2 h-4 w-4" />
+                      PDF export (havi / jármű)
+                    </Button>
+                  </div>
                 </div>
 
                 <div className="overflow-x-auto rounded-3xl border border-white/10">
@@ -6891,6 +9529,7 @@ const handleKmUpdate = async () => {
                         <th className="px-4 py-3 font-semibold">Km (start/end)</th>
                         <th className="px-4 py-3 font-semibold">Táv</th>
                         <th className="px-4 py-3 font-semibold">Típus</th>
+                        <th className="px-4 py-3 font-semibold">Rögzítette</th>
                         <th className="px-4 py-3 font-semibold">Művelet</th>
                       </tr>
                     </thead>
@@ -6919,6 +9558,16 @@ const handleKmUpdate = async () => {
                           const endKm = row.end_km ?? "—";
                           const distance =
                             row.end_km != null && row.start_km != null ? Number(row.end_km) - Number(row.start_km) : null;
+                          const createdBy = String(row.created_by_auth_user_id || "").trim();
+                          const createdByDriver =
+                            createdBy
+                              ? drivers.find((d) => String(d.auth_user_id || "") === createdBy) || null
+                              : null;
+                          const createdLabel = createdBy
+                            ? createdBy === String(session?.user?.id || "")
+                              ? "Admin"
+                              : createdByDriver?.name || "Ismeretlen"
+                            : "—";
 
                           return (
                             <tr key={`journey-${row.id}`} className="bg-slate-950/20">
@@ -6944,15 +9593,37 @@ const handleKmUpdate = async () => {
                               <td className="px-4 py-3 text-slate-200">
                                 {row.trip_type === "private" ? "Privát" : "Üzleti"}
                               </td>
+                              <td className="px-4 py-3 text-slate-200">
+                                {createdLabel}
+                                {createdBy && createdBy !== String(session?.user?.id || "") ? (
+                                  <div className="text-xs text-slate-400">Sofőr</div>
+                                ) : createdBy ? (
+                                  <div className="text-xs text-slate-400">Admin</div>
+                                ) : null}
+                              </td>
                               <td className="px-4 py-3">
-                                <Button
-                                  variant="secondary"
-                                  className="rounded-2xl"
-                                  onClick={() => openEditJourney(row)}
-                                >
-                                  <Pencil className="mr-2 h-4 w-4" />
-                                  Szerkesztés
-                                </Button>
+                                <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+                                  <Button
+                                    variant="secondary"
+                                    size="icon"
+                                    className="rounded-2xl"
+                                    onClick={() => openEditJourney(row)}
+                                    aria-label="Szerkesztés"
+                                  >
+                                    <Pencil className="h-4 w-4" />
+                                  </Button>
+                                  {!isDriver ? (
+                                    <Button
+                                      variant="destructive"
+                                      size="icon"
+                                      className="rounded-2xl"
+                                      onClick={() => openAdminDeleteJourney(row)}
+                                      aria-label="Törlés"
+                                    >
+                                      <Trash2 className="h-4 w-4" />
+                                    </Button>
+                                  ) : null}
+                                </div>
                               </td>
                             </tr>
                           );
@@ -6960,7 +9631,7 @@ const handleKmUpdate = async () => {
 
                       {journeyLogs.length === 0 && (
                         <tr>
-                          <td colSpan={9} className="px-4 py-8 text-center text-slate-400">
+                          <td colSpan={10} className="px-4 py-8 text-center text-slate-400">
                             Még nincs rögzített út napló bejegyzés.
                           </td>
                         </tr>
@@ -7068,10 +9739,18 @@ const handleKmUpdate = async () => {
                       }
                     </span>
                   </div>
-                  <Button className="fleet-primary-btn rounded-2xl" onClick={exportExpensesCsv}>
-                    <Download className="mr-2 h-4 w-4" />
-                    CSV export
-                  </Button>
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    {!isDriver ? (
+                      <Button variant="secondary" className="rounded-2xl" onClick={openAddExpense}>
+                        <Plus className="mr-2 h-4 w-4" />
+                        Új költség
+                      </Button>
+                    ) : null}
+                    <Button className="fleet-primary-btn rounded-2xl" onClick={exportExpensesCsv}>
+                      <Download className="mr-2 h-4 w-4" />
+                      CSV export
+                    </Button>
+                  </div>
                 </div>
 
                 <div className="overflow-x-auto rounded-3xl border border-white/10">
@@ -7088,6 +9767,8 @@ const handleKmUpdate = async () => {
                         <th className="px-4 py-3 font-semibold">ÁFA</th>
                         <th className="px-4 py-3 font-semibold">Bizonylat</th>
                         <th className="px-4 py-3 font-semibold">Státusz</th>
+                        <th className="px-4 py-3 font-semibold">Rögzítette</th>
+                        <th className="px-4 py-3 font-semibold">Művelet</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-white/10">
@@ -7110,6 +9791,16 @@ const handleKmUpdate = async () => {
                         .map((row) => {
                           const vehicle = vehicles.find((v) => String(v.id) === String(row.vehicle_id)) || null;
                           const driver = drivers.find((d) => String(d.id) === String(row.driver_id)) || null;
+                          const createdBy = String(row.created_by_auth_user_id || "").trim();
+                          const createdByDriver =
+                            createdBy
+                              ? drivers.find((d) => String(d.auth_user_id || "") === createdBy) || null
+                              : null;
+                          const createdLabel = createdBy
+                            ? createdBy === String(session?.user?.id || "")
+                              ? "Admin"
+                              : createdByDriver?.name || "Ismeretlen"
+                            : "—";
                           return (
                             <tr key={`admin-exp-${row.id}`} className="bg-slate-950/20">
                               <td className="px-4 py-3 text-slate-200">
@@ -7153,13 +9844,47 @@ const handleKmUpdate = async () => {
                                 )}
                               </td>
                               <td className="px-4 py-3 text-slate-200">{row.status || "—"}</td>
+                              <td className="px-4 py-3 text-slate-200">
+                                {createdLabel}
+                                {createdBy && createdBy !== String(session?.user?.id || "") ? (
+                                  <div className="text-xs text-slate-400">Sofőr</div>
+                                ) : createdBy ? (
+                                  <div className="text-xs text-slate-400">Admin</div>
+                                ) : null}
+                              </td>
+                              <td className="px-4 py-3">
+                                {!isDriver ? (
+                                  <div className="flex flex-col gap-2 sm:flex-row">
+                                    <Button
+                                      variant="secondary"
+                                      size="icon"
+                                      className="rounded-2xl"
+                                      onClick={() => openEditExpense(row)}
+                                      aria-label="Szerkesztés"
+                                    >
+                                      <Pencil className="h-4 w-4" />
+                                    </Button>
+                                    <Button
+                                      variant="destructive"
+                                      size="icon"
+                                      className="rounded-2xl"
+                                      onClick={() => openAdminDeleteExpense(row)}
+                                      aria-label="Törlés"
+                                    >
+                                      <Trash2 className="h-4 w-4" />
+                                    </Button>
+                                  </div>
+                                ) : (
+                                  <span className="text-slate-500">—</span>
+                                )}
+                              </td>
                             </tr>
                           );
                         })}
 
                       {(expenseEntries || []).length === 0 && (
                         <tr>
-                          <td colSpan={10} className="px-4 py-8 text-center text-slate-400">
+                          <td colSpan={12} className="px-4 py-8 text-center text-slate-400">
                             Még nincs rögzített költség.
                           </td>
                         </tr>
@@ -7187,7 +9912,11 @@ const handleKmUpdate = async () => {
                   {enrichedVehicles.map((vehicle) => (
                     <button
                       key={vehicle.id}
-                      onClick={() => setSelectedId(vehicle.id)}
+                      onClick={() => {
+                        setSelectedId(vehicle.id);
+                        setVehicleModalOpen(true);
+                        setIsVehicleDetailsEditing(false);
+                      }}
                       className={`w-full rounded-3xl border p-4 text-left transition ${
                         selectedVehicle?.id === vehicle.id
                           ? "border-slate-300/30 bg-white/10"
@@ -7442,7 +10171,7 @@ const handleKmUpdate = async () => {
           <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
             <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
               <div>
-                <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-sm text-slate-300 backdrop-blur">
+                <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-cyan-400/15 bg-slate-950/40 px-3 py-1 text-sm text-slate-200 shadow-[0_0_22px_rgba(34,211,238,0.08)] backdrop-blur">
                   <UserPlus className="h-4 w-4" />
                   Kapcsolatok
                 </div>
@@ -7450,7 +10179,7 @@ const handleKmUpdate = async () => {
                 <p className="mt-2 text-sm text-slate-400">Sofőr master-data a jármű hozzárendelésekhez.</p>
               </div>
 
-              <Button className="fleet-primary-btn rounded-2xl" onClick={openCreateDriver}>
+              <Button className="fleet-primary-btn rounded-2xl shadow-[0_0_26px_rgba(34,211,238,0.14)] hover:scale-[1.01] active:scale-[0.99] transition" onClick={openCreateDriver}>
                 <Plus className="mr-2 h-4 w-4" />
                 Új sofőr
               </Button>
@@ -7458,51 +10187,123 @@ const handleKmUpdate = async () => {
 
             <Card className="fleet-card rounded-3xl">
               <CardHeader>
-                <CardTitle>Sofőr lista</CardTitle>
-                <CardDescription>Aktív / inaktív státusz és elérhetőségek</CardDescription>
+                <CardTitle>Sofőrök</CardTitle>
+                <CardDescription>Keresés, státusz és gyors műveletek</CardDescription>
               </CardHeader>
               <CardContent className="space-y-3">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="relative w-full sm:max-w-md">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                    <Input
+                      value={driverSearch}
+                      onChange={(e) => setDriverSearch(e.target.value)}
+                      placeholder="Sofőr keresése..."
+                      className="fleet-input h-11 rounded-2xl pl-10"
+                    />
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <Select value={driverStatusFilter} onValueChange={setDriverStatusFilter}>
+                      <SelectTrigger className="fleet-input h-11 rounded-2xl sm:w-[180px]">
+                        <SelectValue placeholder="Státusz" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">Minden státusz</SelectItem>
+                        <SelectItem value="active">Aktív</SelectItem>
+                        <SelectItem value="inactive">Inaktív</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+
                 {drivers.length === 0 ? (
                   <div className="rounded-2xl border border-white/10 bg-slate-900/60 px-4 py-3 text-sm text-slate-400">
                     Még nincs rögzített sofőr.
                   </div>
                 ) : (
-                  drivers.map((d) => (
-                    <div
-                      key={d.id}
-                      className="flex flex-col gap-3 rounded-3xl border border-white/10 bg-slate-900/45 px-4 py-4 md:flex-row md:items-center md:justify-between"
-                    >
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <div className="font-semibold text-white">{d.name}</div>
-                          <span
-                            className={`rounded-full border px-2.5 py-0.5 text-xs ${
-                              d.is_active
-                                ? "border-emerald-400/20 bg-emerald-500/10 text-emerald-100"
-                                : "border-white/10 bg-white/5 text-slate-300"
-                            }`}
-                          >
-                            {d.is_active ? "Aktív" : "Inaktív"}
-                          </span>
-                        </div>
-                        <div className="mt-1 text-sm text-slate-400">
-                          {[d.phone, d.email].filter(Boolean).join(" • ") || "Nincs elérhetőség"}
-                        </div>
-                        {d.notes ? <div className="mt-2 text-sm text-slate-300">{d.notes}</div> : null}
-                      </div>
+                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                    {drivers
+                      .filter((d) => {
+                        const term = String(driverSearch || "").trim().toLowerCase();
+                        const matchesTerm =
+                          !term ||
+                          String(d?.name || "").toLowerCase().includes(term) ||
+                          String(d?.email || "").toLowerCase().includes(term) ||
+                          String(d?.phone || "").toLowerCase().includes(term);
 
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Button variant="secondary" className="rounded-2xl" onClick={() => openEditDriver(d)}>
-                          <Pencil className="mr-2 h-4 w-4" />
-                          Szerkesztés
-                        </Button>
-                        <Button variant="secondary" className="rounded-2xl" onClick={() => setDriverToDelete(d)}>
-                          <Trash2 className="mr-2 h-4 w-4" />
-                          Törlés
-                        </Button>
-                      </div>
-                    </div>
-                  ))
+                        const statusOk =
+                          driverStatusFilter === "all" ||
+                          (driverStatusFilter === "active" ? d?.is_active !== false : d?.is_active === false);
+
+                        return matchesTerm && statusOk;
+                      })
+                      .map((d) => {
+                        const assignedCount = vehicles.filter((v) => String(v?.driver_id || "") === String(d?.id || "")).length;
+                        return (
+                          <div
+                            key={d.id}
+                            className="group relative overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-b from-slate-950/35 via-slate-950/25 to-slate-950/35 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] transition duration-200 hover:-translate-y-[1px] hover:border-cyan-400/20 hover:shadow-[0_18px_70px_rgba(2,6,23,0.55),0_0_34px_rgba(34,211,238,0.08)]"
+                          >
+                            <div className="pointer-events-none absolute inset-x-4 top-0 h-px bg-gradient-to-r from-transparent via-cyan-300/30 to-transparent opacity-70" />
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="flex min-w-0 items-center gap-3">
+                                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-sm font-semibold text-white">
+                                  {initialsFromName(d?.name)}
+                                </div>
+                                <div className="min-w-0">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <div className="truncate font-semibold text-white">{d.name}</div>
+                                    <span
+                                      className={`rounded-full border px-2.5 py-0.5 text-xs ${
+                                        d.is_active
+                                          ? "border-emerald-400/25 bg-emerald-500/10 text-emerald-100 shadow-[0_0_18px_rgba(16,185,129,0.10)]"
+                                          : "border-white/10 bg-white/5 text-slate-300"
+                                      }`}
+                                    >
+                                      {d.is_active ? "Aktív" : "Inaktív"}
+                                    </span>
+                                  </div>
+                                  <div className="mt-1 truncate text-sm text-slate-400">
+                                    {[d.phone, d.email].filter(Boolean).join(" • ") || "Nincs elérhetőség"}
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="mt-4 grid grid-cols-2 gap-3">
+                              <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2">
+                                <div className="text-xs text-slate-400">Hozzárendelt</div>
+                                <div className="mt-0.5 text-lg font-semibold text-white">{assignedCount}</div>
+                                <div className="text-xs text-slate-500">jármű</div>
+                              </div>
+                              <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2">
+                                <div className="text-xs text-slate-400">Megjegyzés</div>
+                                <div className="mt-0.5 line-clamp-2 text-sm text-slate-200">{d.notes || "—"}</div>
+                              </div>
+                            </div>
+
+                            <div className="mt-4 flex flex-wrap items-center gap-2">
+                              <Button
+                                variant="secondary"
+                                className="rounded-2xl border border-white/10 bg-white/5 text-slate-200 hover:border-cyan-400/20 hover:bg-cyan-400/10 hover:text-white transition"
+                                onClick={() => openEditDriver(d)}
+                              >
+                                <Pencil className="mr-2 h-4 w-4" />
+                                Szerkesztés
+                              </Button>
+                              <Button
+                                variant="secondary"
+                                className="rounded-2xl border border-white/10 bg-white/5 text-slate-200 hover:border-red-400/25 hover:bg-red-500/10 hover:text-white transition"
+                                onClick={() => setDriverToDelete(d)}
+                              >
+                                <Trash2 className="mr-2 h-4 w-4" />
+                                Törlés
+                              </Button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
                 )}
               </CardContent>
             </Card>
@@ -7606,7 +10407,7 @@ const handleKmUpdate = async () => {
           <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
             <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
               <div>
-                <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-sm text-slate-300 backdrop-blur">
+                <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-cyan-400/15 bg-slate-950/40 px-3 py-1 text-sm text-slate-200 shadow-[0_0_22px_rgba(34,211,238,0.08)] backdrop-blur">
                   <Wrench className="h-4 w-4" />
                   Kapcsolatok
                 </div>
@@ -7614,7 +10415,7 @@ const handleKmUpdate = async () => {
                 <p className="mt-2 text-sm text-slate-400">Master-data lista szervizekhez és partnerekhez.</p>
               </div>
 
-              <Button className="fleet-primary-btn rounded-2xl" onClick={openCreatePartner}>
+              <Button className="fleet-primary-btn rounded-2xl shadow-[0_0_26px_rgba(34,211,238,0.14)] hover:scale-[1.01] active:scale-[0.99] transition" onClick={openCreatePartner}>
                 <Plus className="mr-2 h-4 w-4" />
                 Új szervizpartner
               </Button>
@@ -7622,52 +10423,115 @@ const handleKmUpdate = async () => {
 
             <Card className="fleet-card rounded-3xl">
               <CardHeader>
-                <CardTitle>Partner lista</CardTitle>
-                <CardDescription>Elérhetőségek, cím és kapcsolattartó</CardDescription>
+                <CardTitle>Szervizpartnerek</CardTitle>
+                <CardDescription>Keresés, státusz és gyors műveletek</CardDescription>
               </CardHeader>
               <CardContent className="space-y-3">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="relative w-full sm:max-w-md">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                    <Input
+                      value={partnerSearch}
+                      onChange={(e) => setPartnerSearch(e.target.value)}
+                      placeholder="Szervizpartner keresése..."
+                      className="fleet-input h-11 rounded-2xl pl-10"
+                    />
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <Select value={partnerStatusFilter} onValueChange={setPartnerStatusFilter}>
+                      <SelectTrigger className="fleet-input h-11 rounded-2xl sm:w-[180px]">
+                        <SelectValue placeholder="Státusz" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">Minden státusz</SelectItem>
+                        <SelectItem value="active">Aktív</SelectItem>
+                        <SelectItem value="inactive">Inaktív</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+
                 {servicePartners.length === 0 ? (
                   <div className="rounded-2xl border border-white/10 bg-slate-900/60 px-4 py-3 text-sm text-slate-400">
                     Még nincs rögzített szervizpartner.
                   </div>
                 ) : (
-                  servicePartners.map((p) => (
-                    <div
-                      key={p.id}
-                      className="flex flex-col gap-3 rounded-3xl border border-white/10 bg-slate-900/45 px-4 py-4 md:flex-row md:items-center md:justify-between"
-                    >
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <div className="font-semibold text-white">{p.name}</div>
-                          <span
-                            className={`rounded-full border px-2.5 py-0.5 text-xs ${
-                              p.is_active
-                                ? "border-emerald-400/20 bg-emerald-500/10 text-emerald-100"
-                                : "border-white/10 bg-white/5 text-slate-300"
-                            }`}
-                          >
-                            {p.is_active ? "Aktív" : "Inaktív"}
-                          </span>
-                        </div>
-                        <div className="mt-1 text-sm text-slate-400">
-                          {[p.contact_person, p.phone, p.email].filter(Boolean).join(" • ") || "Nincs elérhetőség"}
-                        </div>
-                        {p.address ? <div className="mt-2 text-sm text-slate-300">{p.address}</div> : null}
-                        {p.notes ? <div className="mt-2 text-sm text-slate-300">{p.notes}</div> : null}
-                      </div>
+                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                    {servicePartners
+                      .filter((p) => {
+                        const term = String(partnerSearch || "").trim().toLowerCase();
+                        const matchesTerm =
+                          !term ||
+                          String(p?.name || "").toLowerCase().includes(term) ||
+                          String(p?.contact_person || "").toLowerCase().includes(term) ||
+                          String(p?.email || "").toLowerCase().includes(term) ||
+                          String(p?.phone || "").toLowerCase().includes(term) ||
+                          String(p?.address || "").toLowerCase().includes(term);
 
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Button variant="secondary" className="rounded-2xl" onClick={() => openEditPartner(p)}>
-                          <Pencil className="mr-2 h-4 w-4" />
-                          Szerkesztés
-                        </Button>
-                        <Button variant="secondary" className="rounded-2xl" onClick={() => setPartnerToDelete(p)}>
-                          <Trash2 className="mr-2 h-4 w-4" />
-                          Törlés
-                        </Button>
-                      </div>
-                    </div>
-                  ))
+                        const statusOk =
+                          partnerStatusFilter === "all" ||
+                          (partnerStatusFilter === "active" ? p?.is_active !== false : p?.is_active === false);
+
+                        return matchesTerm && statusOk;
+                      })
+                      .map((p) => (
+                        <div
+                          key={p.id}
+                          className="group relative overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-b from-slate-950/35 via-slate-950/25 to-slate-950/35 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] transition duration-200 hover:-translate-y-[1px] hover:border-cyan-400/20 hover:shadow-[0_18px_70px_rgba(2,6,23,0.55),0_0_34px_rgba(34,211,238,0.08)]"
+                        >
+                          <div className="pointer-events-none absolute inset-x-4 top-0 h-px bg-gradient-to-r from-transparent via-cyan-300/30 to-transparent opacity-70" />
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="flex min-w-0 items-center gap-3">
+                              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-sm font-semibold text-white">
+                                {initialsFromName(p?.name)}
+                              </div>
+                              <div className="min-w-0">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <div className="truncate font-semibold text-white">{p.name}</div>
+                                  <span
+                                    className={`rounded-full border px-2.5 py-0.5 text-xs ${
+                                      p.is_active
+                                        ? "border-emerald-400/25 bg-emerald-500/10 text-emerald-100 shadow-[0_0_18px_rgba(16,185,129,0.10)]"
+                                        : "border-white/10 bg-white/5 text-slate-300"
+                                    }`}
+                                  >
+                                    {p.is_active ? "Aktív" : "Inaktív"}
+                                  </span>
+                                </div>
+                                <div className="mt-1 truncate text-sm text-slate-400">
+                                  {[p.contact_person, p.phone, p.email].filter(Boolean).join(" • ") || "Nincs elérhetőség"}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="mt-4 space-y-2">
+                            {p.address ? <div className="text-sm text-slate-300">{p.address}</div> : null}
+                            {p.notes ? <div className="line-clamp-2 text-sm text-slate-300">{p.notes}</div> : null}
+                          </div>
+
+                          <div className="mt-4 flex flex-wrap items-center gap-2">
+                            <Button
+                              variant="secondary"
+                              className="rounded-2xl border border-white/10 bg-white/5 text-slate-200 hover:border-cyan-400/20 hover:bg-cyan-400/10 hover:text-white transition"
+                              onClick={() => openEditPartner(p)}
+                            >
+                              <Pencil className="mr-2 h-4 w-4" />
+                              Szerkesztés
+                            </Button>
+                            <Button
+                              variant="secondary"
+                              className="rounded-2xl border border-white/10 bg-white/5 text-slate-200 hover:border-red-400/25 hover:bg-red-500/10 hover:text-white transition"
+                              onClick={() => setPartnerToDelete(p)}
+                            >
+                              <Trash2 className="mr-2 h-4 w-4" />
+                              Törlés
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
+                  </div>
                 )}
               </CardContent>
             </Card>
@@ -7759,6 +10623,43 @@ const handleKmUpdate = async () => {
           </motion.div>
         )}
       </div>
+
+      <Dialog
+        open={Boolean(adminDeleteDialog)}
+        onOpenChange={(next) => {
+          if (!next && !adminDeleteSaving) setAdminDeleteDialog(null);
+        }}
+      >
+        <DialogContent className="fleet-dialog sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {adminDeleteDialog?.kind === "journey" ? "Út bejegyzés törlése" : "Költség törlése"}
+            </DialogTitle>
+            <DialogDescription>
+              Biztosan véglegesen törlöd ezt a bejegyzést? A művelet nem vonható vissza.
+              {adminDeleteDialog?.summary ? (
+                <>
+                  <br />
+                  <span className="mt-2 block font-medium text-white">{adminDeleteDialog.summary}</span>
+                </>
+              ) : null}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="secondary"
+              className="rounded-2xl"
+              disabled={adminDeleteSaving}
+              onClick={() => setAdminDeleteDialog(null)}
+            >
+              Mégse
+            </Button>
+            <Button className="rounded-2xl" variant="destructive" disabled={adminDeleteSaving} onClick={confirmAdminDelete}>
+              {adminDeleteSaving ? "Törlés…" : "Törlés"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={journeyEditOpen} onOpenChange={setJourneyEditOpen}>
         <DialogContent className="fleet-dialog sm:max-w-2xl">
@@ -7879,6 +10780,596 @@ const handleKmUpdate = async () => {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={expenseEditOpen} onOpenChange={setExpenseEditOpen}>
+        <DialogContent className="fleet-dialog sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Költség bejegyzés szerkesztése</DialogTitle>
+            <DialogDescription>
+              Admin jogosultsággal javíthatod a költség napló sorokat.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-2">
+              <Label>Dátum</Label>
+              <Input
+                type="date"
+                value={expenseEditForm.occurredAt}
+                onChange={(e) => setExpenseEditForm((p) => ({ ...p, occurredAt: e.target.value }))}
+                className="fleet-input rounded-2xl"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Típus</Label>
+              <Select
+                value={expenseEditForm.expenseType || "fuel"}
+                onValueChange={(value) => setExpenseEditForm((p) => ({ ...p, expenseType: value }))}
+              >
+                <SelectTrigger className="fleet-input rounded-2xl">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="fuel">Tankolás</SelectItem>
+                  <SelectItem value="toll">Útdíj</SelectItem>
+                  <SelectItem value="parking">Parkolás</SelectItem>
+                  <SelectItem value="service">Szerviz</SelectItem>
+                  <SelectItem value="fluid">Folyadék</SelectItem>
+                  <SelectItem value="other">Egyéb</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Kút</Label>
+              <Input
+                value={expenseEditForm.stationName}
+                onChange={(e) => setExpenseEditForm((p) => ({ ...p, stationName: e.target.value }))}
+                className="fleet-input rounded-2xl"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Helyszín</Label>
+              <Input
+                value={expenseEditForm.stationLocation}
+                onChange={(e) => setExpenseEditForm((p) => ({ ...p, stationLocation: e.target.value }))}
+                className="fleet-input rounded-2xl"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Km óraállás</Label>
+              <Input
+                type="number"
+                inputMode="numeric"
+                min={0}
+                value={expenseEditForm.odometerKm}
+                onChange={(e) => setExpenseEditForm((p) => ({ ...p, odometerKm: e.target.value }))}
+                className="fleet-input rounded-2xl"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Státusz</Label>
+              <Input
+                value={expenseEditForm.status}
+                onChange={(e) => setExpenseEditForm((p) => ({ ...p, status: e.target.value }))}
+                className="fleet-input rounded-2xl"
+                placeholder="posted / draft_ai / ..."
+              />
+            </div>
+
+            {String(expenseEditForm.expenseType || "fuel") === "fuel" ? (
+              <>
+                <div className="space-y-2">
+                  <Label>Üzemanyag</Label>
+                  <Input
+                    value={expenseEditForm.fuelType}
+                    onChange={(e) => setExpenseEditForm((p) => ({ ...p, fuelType: e.target.value }))}
+                    className="fleet-input rounded-2xl"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>Liter</Label>
+                  <Input
+                    type="number"
+                    inputMode="decimal"
+                    min={0}
+                    value={expenseEditForm.liters}
+                    onChange={(e) => setExpenseEditForm((p) => ({ ...p, liters: e.target.value }))}
+                    className="fleet-input rounded-2xl"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>Egységár</Label>
+                  <Input
+                    type="number"
+                    inputMode="decimal"
+                    min={0}
+                    value={expenseEditForm.unitPrice}
+                    onChange={(e) => setExpenseEditForm((p) => ({ ...p, unitPrice: e.target.value }))}
+                    className="fleet-input rounded-2xl"
+                  />
+                </div>
+              </>
+            ) : null}
+
+            <div className="space-y-2">
+              <Label>Bruttó</Label>
+              <Input
+                type="number"
+                inputMode="decimal"
+                min={0}
+                value={expenseEditForm.grossAmount}
+                onChange={(e) => setExpenseEditForm((p) => ({ ...p, grossAmount: e.target.value }))}
+                className="fleet-input rounded-2xl"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Pénznem</Label>
+              <Input
+                value={expenseEditForm.currency}
+                onChange={(e) => setExpenseEditForm((p) => ({ ...p, currency: e.target.value }))}
+                className="fleet-input rounded-2xl"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Nettó (opcionális)</Label>
+              <Input
+                type="number"
+                inputMode="decimal"
+                min={0}
+                value={expenseEditForm.netAmount}
+                onChange={(e) => setExpenseEditForm((p) => ({ ...p, netAmount: e.target.value }))}
+                className="fleet-input rounded-2xl"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>ÁFA összeg (opcionális)</Label>
+              <Input
+                type="number"
+                inputMode="decimal"
+                min={0}
+                value={expenseEditForm.vatAmount}
+                onChange={(e) => setExpenseEditForm((p) => ({ ...p, vatAmount: e.target.value }))}
+                className="fleet-input rounded-2xl"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>ÁFA % (opcionális)</Label>
+              <Input
+                type="number"
+                inputMode="decimal"
+                min={0}
+                value={expenseEditForm.vatRate}
+                onChange={(e) => setExpenseEditForm((p) => ({ ...p, vatRate: e.target.value }))}
+                className="fleet-input rounded-2xl"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Számlaszám (opcionális)</Label>
+              <Input
+                value={expenseEditForm.invoiceNumber}
+                onChange={(e) => setExpenseEditForm((p) => ({ ...p, invoiceNumber: e.target.value }))}
+                className="fleet-input rounded-2xl"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Fizetés módja</Label>
+              <Input
+                value={expenseEditForm.paymentMethod}
+                onChange={(e) => setExpenseEditForm((p) => ({ ...p, paymentMethod: e.target.value }))}
+                className="fleet-input rounded-2xl"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Kártya utolsó 4 (opcionális)</Label>
+              <Input
+                value={expenseEditForm.paymentCardLast4}
+                onChange={(e) => setExpenseEditForm((p) => ({ ...p, paymentCardLast4: e.target.value }))}
+                className="fleet-input rounded-2xl"
+              />
+            </div>
+
+            <div className="space-y-2 md:col-span-2">
+              <Label>Megjegyzés</Label>
+              <Input
+                value={expenseEditForm.note}
+                onChange={(e) => setExpenseEditForm((p) => ({ ...p, note: e.target.value }))}
+                className="fleet-input rounded-2xl"
+              />
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="secondary"
+              className="rounded-2xl"
+              onClick={() => setExpenseEditOpen(false)}
+              disabled={expenseLoading}
+            >
+              Mégse
+            </Button>
+            <Button
+              className="fleet-primary-btn rounded-2xl"
+              onClick={saveEditedExpense}
+              disabled={expenseLoading}
+            >
+              <Save className="mr-2 h-4 w-4" />
+              Mentés
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={journeyAddOpen} onOpenChange={setJourneyAddOpen}>
+        <DialogContent className="fleet-dialog sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Út hozzáadása</DialogTitle>
+            <DialogDescription>Admin rögzítés az útnyilvántartáshoz.</DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-2">
+              <Label>Jármű</Label>
+              <Select value={journeyAddForm.vehicleId} onValueChange={(v) => setJourneyAddForm((p) => ({ ...p, vehicleId: v }))}>
+                <SelectTrigger className="fleet-input rounded-2xl">
+                  <SelectValue placeholder="Válassz" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Válassz…</SelectItem>
+                  {vehicles.map((veh) => (
+                    <SelectItem key={`add-journey-veh-${veh.id}`} value={String(veh.id)}>
+                      {veh.name || "Jármű"} • {veh.plate || "—"}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Sofőr</Label>
+              <Select value={journeyAddForm.driverId} onValueChange={(v) => setJourneyAddForm((p) => ({ ...p, driverId: v }))}>
+                <SelectTrigger className="fleet-input rounded-2xl">
+                  <SelectValue placeholder="Válassz" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Válassz…</SelectItem>
+                  {drivers.map((d) => (
+                    <SelectItem key={`add-journey-driver-${d.id}`} value={String(d.id)}>
+                      {d.name || "Sofőr"}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Indulás ideje</Label>
+              <Input
+                type="datetime-local"
+                value={journeyAddForm.startedAt}
+                onChange={(e) => setJourneyAddForm((p) => ({ ...p, startedAt: e.target.value }))}
+                className="fleet-input rounded-2xl"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Befejezés ideje (opcionális)</Label>
+              <Input
+                type="datetime-local"
+                value={journeyAddForm.endedAt}
+                onChange={(e) => setJourneyAddForm((p) => ({ ...p, endedAt: e.target.value }))}
+                className="fleet-input rounded-2xl"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Induló km</Label>
+              <Input
+                type="number"
+                inputMode="numeric"
+                min={0}
+                value={journeyAddForm.startKm}
+                onChange={(e) => setJourneyAddForm((p) => ({ ...p, startKm: e.target.value }))}
+                className="fleet-input rounded-2xl"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Érkező km</Label>
+              <Input
+                type="number"
+                inputMode="numeric"
+                min={0}
+                value={journeyAddForm.endKm}
+                onChange={(e) => setJourneyAddForm((p) => ({ ...p, endKm: e.target.value }))}
+                className="fleet-input rounded-2xl"
+              />
+            </div>
+
+            <div className="space-y-2 md:col-span-2">
+              <Label>Honnan</Label>
+              <Input
+                value={journeyAddForm.startLocation}
+                onChange={(e) => setJourneyAddForm((p) => ({ ...p, startLocation: e.target.value }))}
+                className="fleet-input rounded-2xl"
+              />
+            </div>
+            <div className="space-y-2 md:col-span-2">
+              <Label>Hová</Label>
+              <Input
+                value={journeyAddForm.endLocation}
+                onChange={(e) => setJourneyAddForm((p) => ({ ...p, endLocation: e.target.value }))}
+                className="fleet-input rounded-2xl"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Típus</Label>
+              <Select value={journeyAddForm.tripType} onValueChange={(v) => setJourneyAddForm((p) => ({ ...p, tripType: v }))}>
+                <SelectTrigger className="fleet-input rounded-2xl">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="business">Üzleti</SelectItem>
+                  <SelectItem value="private">Privát</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>Megjegyzés</Label>
+              <Input
+                value={journeyAddForm.note}
+                onChange={(e) => setJourneyAddForm((p) => ({ ...p, note: e.target.value }))}
+                className="fleet-input rounded-2xl"
+              />
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button variant="secondary" className="rounded-2xl" onClick={() => setJourneyAddOpen(false)} disabled={journeyLoading}>
+              Mégse
+            </Button>
+            <Button className="fleet-primary-btn rounded-2xl" onClick={saveAddedJourney} disabled={journeyLoading}>
+              <Save className="mr-2 h-4 w-4" />
+              Mentés
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={expenseAddOpen} onOpenChange={setExpenseAddOpen}>
+        <DialogContent className="fleet-dialog sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Költség hozzáadása</DialogTitle>
+            <DialogDescription>Manuális rögzítés vagy bizonylat → AI draft.</DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-2">
+              <Label>Mód</Label>
+              <Select value={expenseAddMode} onValueChange={(v) => setExpenseAddMode(v === "ai" ? "ai" : "manual")}>
+                <SelectTrigger className="fleet-input rounded-2xl">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="manual">Manuális</SelectItem>
+                  <SelectItem value="ai">AI (bizonylat)</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div />
+
+            <div className="space-y-2">
+              <Label>Jármű</Label>
+              <Select value={expenseAddForm.vehicleId} onValueChange={(v) => setExpenseAddForm((p) => ({ ...p, vehicleId: v }))}>
+                <SelectTrigger className="fleet-input rounded-2xl">
+                  <SelectValue placeholder="Válassz" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Válassz…</SelectItem>
+                  {vehicles.map((veh) => (
+                    <SelectItem key={`add-exp-veh-${veh.id}`} value={String(veh.id)}>
+                      {veh.name || "Jármű"} • {veh.plate || "—"}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Sofőr</Label>
+              <Select value={expenseAddForm.driverId} onValueChange={(v) => setExpenseAddForm((p) => ({ ...p, driverId: v }))}>
+                <SelectTrigger className="fleet-input rounded-2xl">
+                  <SelectValue placeholder="Válassz" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Válassz…</SelectItem>
+                  {drivers.map((d) => (
+                    <SelectItem key={`add-exp-driver-${d.id}`} value={String(d.id)}>
+                      {d.name || "Sofőr"}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {expenseAddMode === "ai" ? (
+              <>
+                <div className="space-y-2">
+                  <Label>AI szolgáltató</Label>
+                  <Select value={expenseAddAiProvider} onValueChange={(v) => setExpenseAddAiProvider(v)}>
+                    <SelectTrigger className="fleet-input rounded-2xl">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="auto">Automatikus</SelectItem>
+                      <SelectItem value="gemini">Gemini</SelectItem>
+                      <SelectItem value="openai">OpenAI</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label>Bizonylat</Label>
+                  <Input
+                    type="file"
+                    accept="image/*,application/pdf"
+                    className="fleet-input rounded-2xl"
+                    disabled={expenseAddSaving}
+                    onChange={(e) => setExpenseAddFile(e.target.files?.[0] || null)}
+                  />
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="space-y-2">
+                  <Label>Dátum</Label>
+                  <Input
+                    type="date"
+                    value={expenseAddForm.occurredAt}
+                    onChange={(e) => setExpenseAddForm((p) => ({ ...p, occurredAt: e.target.value }))}
+                    className="fleet-input rounded-2xl"
+                    disabled={expenseAddSaving}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>Típus</Label>
+                  <Select value={expenseAddForm.expenseType} onValueChange={(v) => setExpenseAddForm((p) => ({ ...p, expenseType: v }))}>
+                    <SelectTrigger className="fleet-input rounded-2xl">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="fuel">Tankolás</SelectItem>
+                      <SelectItem value="toll">Útdíj</SelectItem>
+                      <SelectItem value="parking">Parkolás</SelectItem>
+                      <SelectItem value="service">Szerviz</SelectItem>
+                      <SelectItem value="fluid">Folyadék</SelectItem>
+                      <SelectItem value="other">Egyéb</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Kút</Label>
+                  <Input value={expenseAddForm.stationName} onChange={(e) => setExpenseAddForm((p) => ({ ...p, stationName: e.target.value }))} className="fleet-input rounded-2xl" disabled={expenseAddSaving} />
+                </div>
+                <div className="space-y-2">
+                  <Label>Helyszín</Label>
+                  <Input value={expenseAddForm.stationLocation} onChange={(e) => setExpenseAddForm((p) => ({ ...p, stationLocation: e.target.value }))} className="fleet-input rounded-2xl" disabled={expenseAddSaving} />
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Km</Label>
+                  <Input type="number" inputMode="numeric" min={0} value={expenseAddForm.odometerKm} onChange={(e) => setExpenseAddForm((p) => ({ ...p, odometerKm: e.target.value }))} className="fleet-input rounded-2xl" disabled={expenseAddSaving} />
+                </div>
+                <div className="space-y-2">
+                  <Label>Pénznem</Label>
+                  <Input value={expenseAddForm.currency} onChange={(e) => setExpenseAddForm((p) => ({ ...p, currency: e.target.value }))} className="fleet-input rounded-2xl" disabled={expenseAddSaving} />
+                </div>
+
+                {String(expenseAddForm.expenseType || "fuel") === "fuel" ? (
+                  <>
+                    <div className="space-y-2">
+                      <Label>Üzemanyag</Label>
+                      <Input value={expenseAddForm.fuelType} onChange={(e) => setExpenseAddForm((p) => ({ ...p, fuelType: e.target.value }))} className="fleet-input rounded-2xl" disabled={expenseAddSaving} />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Liter</Label>
+                      <Input type="number" inputMode="decimal" min={0} value={expenseAddForm.liters} onChange={(e) => setExpenseAddForm((p) => ({ ...p, liters: e.target.value }))} className="fleet-input rounded-2xl" disabled={expenseAddSaving} />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Egységár</Label>
+                      <Input type="number" inputMode="decimal" min={0} value={expenseAddForm.unitPrice} onChange={(e) => setExpenseAddForm((p) => ({ ...p, unitPrice: e.target.value }))} className="fleet-input rounded-2xl" disabled={expenseAddSaving} />
+                    </div>
+                  </>
+                ) : null}
+
+                <div className="space-y-2">
+                  <Label>Bruttó</Label>
+                  <Input type="number" inputMode="decimal" min={0} value={expenseAddForm.grossAmount} onChange={(e) => setExpenseAddForm((p) => ({ ...p, grossAmount: e.target.value }))} className="fleet-input rounded-2xl" disabled={expenseAddSaving} />
+                </div>
+                <div className="space-y-2">
+                  <Label>Nettó (opcionális)</Label>
+                  <Input
+                    type="number"
+                    inputMode="decimal"
+                    min={0}
+                    value={expenseAddForm.netAmount}
+                    onChange={(e) => setExpenseAddForm((p) => ({ ...p, netAmount: e.target.value }))}
+                    className="fleet-input rounded-2xl"
+                    disabled={expenseAddSaving}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label>ÁFA összeg (opcionális)</Label>
+                  <Input
+                    type="number"
+                    inputMode="decimal"
+                    min={0}
+                    value={expenseAddForm.vatAmount}
+                    onChange={(e) => setExpenseAddForm((p) => ({ ...p, vatAmount: e.target.value }))}
+                    className="fleet-input rounded-2xl"
+                    disabled={expenseAddSaving}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>ÁFA % (opcionális)</Label>
+                  <Input
+                    type="number"
+                    inputMode="decimal"
+                    min={0}
+                    value={expenseAddForm.vatRate}
+                    onChange={(e) => setExpenseAddForm((p) => ({ ...p, vatRate: e.target.value }))}
+                    className="fleet-input rounded-2xl"
+                    disabled={expenseAddSaving}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>Fizetés</Label>
+                  <Input value={expenseAddForm.paymentMethod} onChange={(e) => setExpenseAddForm((p) => ({ ...p, paymentMethod: e.target.value }))} className="fleet-input rounded-2xl" disabled={expenseAddSaving} />
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Kártya utolsó 4</Label>
+                  <Input value={expenseAddForm.paymentCardLast4} onChange={(e) => setExpenseAddForm((p) => ({ ...p, paymentCardLast4: e.target.value }))} className="fleet-input rounded-2xl" disabled={expenseAddSaving} />
+                </div>
+                <div className="space-y-2">
+                  <Label>Bizonylat (opcionális)</Label>
+                  <Input type="file" accept="image/*,application/pdf" className="fleet-input rounded-2xl" disabled={expenseAddSaving} onChange={(e) => setExpenseAddReceiptFile(e.target.files?.[0] || null)} />
+                </div>
+
+                <div className="space-y-2 md:col-span-2">
+                  <Label>Megjegyzés</Label>
+                  <Input value={expenseAddForm.note} onChange={(e) => setExpenseAddForm((p) => ({ ...p, note: e.target.value }))} className="fleet-input rounded-2xl" disabled={expenseAddSaving} />
+                </div>
+              </>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button variant="secondary" className="rounded-2xl" onClick={() => setExpenseAddOpen(false)} disabled={expenseAddSaving}>
+              Mégse
+            </Button>
+            <Button
+              className="fleet-primary-btn rounded-2xl"
+              onClick={expenseAddMode === "ai" ? saveAddedExpenseAi : saveAddedExpenseManual}
+              disabled={expenseAddSaving}
+            >
+              <Save className="mr-2 h-4 w-4" />
+              {expenseAddMode === "ai" ? "AI indítás" : "Mentés"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {documentPreview && (
         <div className="fixed inset-0 z-[120] bg-slate-950/90 backdrop-blur-sm">
           <div className="flex h-full w-full items-center justify-center p-3 sm:p-5">
@@ -7895,25 +11386,64 @@ const handleKmUpdate = async () => {
                   </div>
                 </div>
 
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="shrink-0 rounded-2xl text-slate-300 hover:bg-white/10 hover:text-white"
-                  onClick={() => setDocumentPreview(null)}
-                >
-                  <X className="h-5 w-5" />
-                </Button>
+                <div className="flex shrink-0 items-center gap-2">
+                  {isPreviewableImage(documentPreview) ? (
+                    <>
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        className="rounded-2xl"
+                        onClick={() => setDocumentPreviewZoom((z) => Math.max(0.5, Number((z - 0.25).toFixed(2))))}
+                      >
+                        −
+                      </Button>
+                      <div className="min-w-[70px] text-center text-xs font-semibold text-slate-200">
+                        {Math.round(documentPreviewZoom * 100)}%
+                      </div>
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        className="rounded-2xl"
+                        onClick={() => setDocumentPreviewZoom((z) => Math.min(4, Number((z + 0.25).toFixed(2))))}
+                      >
+                        +
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        className="rounded-2xl"
+                        onClick={() => setDocumentPreviewZoom(1)}
+                      >
+                        100%
+                      </Button>
+                    </>
+                  ) : null}
+
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="rounded-2xl text-slate-300 hover:bg-white/10 hover:text-white"
+                    onClick={() => setDocumentPreview(null)}
+                  >
+                    <X className="h-5 w-5" />
+                  </Button>
+                </div>
               </div>
 
               <div className="flex-1 p-3 sm:p-5">
                 <div className="h-full w-full overflow-hidden rounded-3xl border border-white/10 bg-slate-900/60 p-2 sm:p-3">
                   {documentPreview.fileDataUrl ? (
                     isPreviewableImage(documentPreview) ? (
-                      <div className="flex h-full w-full items-center justify-center overflow-auto rounded-2xl bg-slate-950 p-2 sm:p-4">
+                      <div className="h-full w-full overflow-auto overscroll-contain rounded-2xl bg-slate-950 p-2 sm:p-4 touch-pan-x touch-pan-y">
                         <img
                           src={documentPreview.fileDataUrl}
                           alt={documentPreview.fileName || "Dokumentum előnézet"}
-                          className="max-h-full max-w-full rounded-2xl object-contain"
+                          draggable={false}
+                          style={{
+                            transform: `scale(${documentPreviewZoom})`,
+                            transformOrigin: "top left",
+                          }}
+                          className="block max-h-none max-w-none rounded-2xl object-contain"
                         />
                       </div>
                     ) : isPreviewablePdf(documentPreview) ? (
@@ -7990,6 +11520,26 @@ const handleKmUpdate = async () => {
 
           <div className="grid gap-4 py-2 md:grid-cols-2">
             <div className="space-y-2">
+              <Label>Márka</Label>
+              <Input
+                value={form.brand}
+                onChange={(e) => setForm({ ...form, brand: e.target.value })}
+                placeholder="pl. Opel"
+                className="fleet-input rounded-2xl"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Típus</Label>
+              <Input
+                value={form.model}
+                onChange={(e) => setForm({ ...form, model: e.target.value })}
+                placeholder="pl. Astra"
+                className="fleet-input rounded-2xl"
+              />
+            </div>
+
+            <div className="space-y-2">
               <Label>Autó neve</Label>
               <Input
                 value={form.name}
@@ -8005,6 +11555,81 @@ const handleKmUpdate = async () => {
                 onChange={(e) => setForm({ ...form, plate: e.target.value })}
                 className="fleet-input rounded-2xl"
               />
+            </div>
+
+            <div className="space-y-2 md:col-span-2">
+              <div className="flex flex-col gap-2 rounded-3xl border border-white/10 bg-slate-950/35 p-4">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <div className="text-sm font-semibold text-white">Forgalmi (elöl + hátul) → AI kitöltés</div>
+                    <div className="mt-0.5 text-xs text-slate-400">
+                      Tölts fel 2 képet, és az AI kitölti a rendszám/VIN/márka/típus/év/üzemanyag mezőket.
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Select
+                      value={registrationAiProvider}
+                      onValueChange={(next) => {
+                        const v =
+                          next === "openai" || next === "gemini" || next === "auto" ? next : "auto";
+                        setRegistrationAiProvider(v);
+                        try {
+                          window.localStorage.setItem("fleet_registration_ai_provider", v);
+                        } catch {
+                          /* ignore */
+                        }
+                      }}
+                      disabled={registrationAiSaving}
+                    >
+                      <SelectTrigger className="fleet-input h-10 rounded-2xl sm:w-[220px]">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="auto">Automatikus</SelectItem>
+                        <SelectItem value="gemini">Google Gemini</SelectItem>
+                        <SelectItem value="openai">OpenAI</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Button
+                      type="button"
+                      className="fleet-primary-btn h-10 rounded-2xl"
+                      disabled={registrationAiSaving || !registrationFrontFile || !registrationBackFile}
+                      onClick={runRegistrationAiPrefill}
+                    >
+                      {registrationAiSaving ? "AI..." : "AI kitöltés"}
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label>Forgalmi – elöl</Label>
+                    <Input
+                      type="file"
+                      accept="image/*"
+                      className="fleet-input rounded-2xl"
+                      disabled={registrationAiSaving}
+                      onChange={(e) => setRegistrationFrontFile(e.target.files?.[0] || null)}
+                    />
+                    {registrationFrontFile ? (
+                      <div className="text-xs text-slate-400">{registrationFrontFile.name}</div>
+                    ) : null}
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Forgalmi – hátul</Label>
+                    <Input
+                      type="file"
+                      accept="image/*"
+                      className="fleet-input rounded-2xl"
+                      disabled={registrationAiSaving}
+                      onChange={(e) => setRegistrationBackFile(e.target.files?.[0] || null)}
+                    />
+                    {registrationBackFile ? (
+                      <div className="text-xs text-slate-400">{registrationBackFile.name}</div>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
             </div>
 
             <div className="space-y-2">
@@ -8087,6 +11712,22 @@ const handleKmUpdate = async () => {
                 </SelectContent>
               </Select>
             </div>
+
+            {currentCompanyRole === "admin" ? (
+              <div className="space-y-2">
+                <Label>Státusz</Label>
+                <Select value={form.status} onValueChange={(value) => setForm({ ...form, status: value })}>
+                  <SelectTrigger className="fleet-input rounded-2xl">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="active">Aktív</SelectItem>
+                    <SelectItem value="service">Szerviz alatt</SelectItem>
+                    <SelectItem value="inactive">Inaktív</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            ) : null}
 
             <div className="space-y-2">
               <Label>Biztosítás lejárat</Label>

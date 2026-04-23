@@ -2,8 +2,8 @@
 -- Creates:
 -- - expense_entries: unified fuel/expense log
 -- - expense_ai_jobs: receipt-processing jobs
--- Adds RLS policies for admin + driver (assigned vehicles) and storage.objects policies
--- for private bucket `expense-receipts`.
+-- Adds RLS policies for admin + driver (assigned vehicles), ensures storage bucket
+-- `expense-receipts` exists, and adds storage.objects policies for that bucket.
 --
 -- Prereq: public.current_driver_id() exists (see supabase-driver-docs.sql)
 
@@ -257,8 +257,14 @@ with check (
   )
 );
 
--- 5) Storage policies for private bucket `expense-receipts`
--- NOTE: Create bucket `expense-receipts` and set to Private in Supabase dashboard.
+-- 5) Storage bucket `expense-receipts` (private)
+-- If this insert is not allowed in your environment, create the bucket manually:
+-- Dashboard → Storage → New bucket → id/name: expense-receipts → Private.
+insert into storage.buckets (id, name, public)
+values ('expense-receipts', 'expense-receipts', false)
+on conflict (id) do nothing;
+
+-- 6) Storage policies for private bucket `expense-receipts`
 
 drop policy if exists expense_receipts_objects_read on storage.objects;
 create policy expense_receipts_objects_read on storage.objects

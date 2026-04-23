@@ -1,4 +1,3 @@
-@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;700&display=swap");
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
@@ -49,24 +48,24 @@
 }
 
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
+  --background: #ffffff;
+  --foreground: #0b1220;
+  --card: #ffffff;
+  --card-foreground: #0b1220;
+  --popover: #ffffff;
+  --popover-foreground: #0b1220;
+  --primary: #3b82f6;
+  --primary-foreground: #0b1220;
+  --secondary: #f1f5f9;
+  --secondary-foreground: #0b1220;
+  --muted: #f1f5f9;
+  --muted-foreground: #64748b;
+  --accent: #f1f5f9;
+  --accent-foreground: #0b1220;
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  --border: rgba(11, 18, 32, 0.10);
+  --input: rgba(11, 18, 32, 0.12);
+  --ring: rgba(59, 130, 246, 0.55);
   --chart-1: oklch(0.809 0.105 251.813);
   --chart-2: oklch(0.623 0.214 259.815);
   --chart-3: oklch(0.546 0.245 262.881);
@@ -84,37 +83,259 @@
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
+  --background: #0b0f1a;
+  --foreground: rgba(226, 232, 240, 0.92);
+  --card: #0f172a;
+  --card-foreground: rgba(226, 232, 240, 0.92);
+  --popover: #0f172a;
+  --popover-foreground: rgba(226, 232, 240, 0.92);
+  /* Primary accent: blue/cyan neon (global) */
+  --primary: #38bdf8;
+  --primary-foreground: #071018;
+  --secondary: rgba(255, 255, 255, 0.055);
+  --secondary-foreground: rgba(226, 232, 240, 0.92);
+  --muted: rgba(255, 255, 255, 0.045);
+  --muted-foreground: rgba(226, 232, 240, 0.72);
+  --accent: rgba(255, 255, 255, 0.055);
+  --accent-foreground: rgba(226, 232, 240, 0.92);
   --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
+  --border: rgba(255, 255, 255, 0.07);
+  --input: rgba(255, 255, 255, 0.08);
+  --ring: rgba(56, 189, 248, 0.55);
   --chart-1: oklch(0.809 0.105 251.813);
   --chart-2: oklch(0.623 0.214 259.815);
   --chart-3: oklch(0.546 0.245 262.881);
   --chart-4: oklch(0.488 0.243 264.376);
   --chart-5: oklch(0.424 0.199 265.638);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --sidebar: rgba(2, 6, 23, 0.92);
+  --sidebar-foreground: rgba(226, 232, 240, 0.90);
+  --sidebar-primary: color-mix(in oklab, var(--primary) 62%, white);
+  --sidebar-primary-foreground: #071018;
+  --sidebar-accent: rgba(255, 255, 255, 0.05);
+  --sidebar-accent-foreground: rgba(226, 232, 240, 0.92);
+  --sidebar-border: rgba(255, 255, 255, 0.10);
+  --sidebar-ring: rgba(56, 189, 248, 0.42);
+}
+
+.dark body .fleet-page-bg { filter: none; }
+
+.dark body .fleet-sidebar {
+  border-color: rgba(216, 180, 254, 0.14);
+  background:
+    linear-gradient(180deg, rgba(6, 8, 20, 0.92), rgba(2, 6, 23, 0.92)),
+    radial-gradient(circle at 30% 12%, rgba(56, 189, 248, 0.10), transparent 42%),
+    radial-gradient(circle at 70% 90%, rgba(34, 211, 238, 0.06), transparent 46%);
+  box-shadow:
+    0 24px 90px rgba(2, 6, 23, 0.66),
+    0 0 46px rgba(34, 211, 238, 0.10),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.dark body .fleet-shell {
+  border-color: rgba(216, 180, 254, 0.14);
+  background:
+    radial-gradient(circle at 18% 10%, rgba(56, 189, 248, 0.10), transparent 42%),
+    radial-gradient(circle at 80% 18%, rgba(34, 211, 238, 0.06), transparent 46%),
+    color-mix(in oklab, var(--background) 78%, transparent);
+  box-shadow:
+    0 28px 84px rgba(2, 6, 23, 0.62),
+    0 0 54px rgba(34, 211, 238, 0.10),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.dark body .fleet-shell::before {
+  background:
+    linear-gradient(
+      135deg,
+      rgba(56, 189, 248, 0.14),
+      transparent 26%,
+      transparent 74%,
+      rgba(34, 211, 238, 0.08)
+    ),
+    radial-gradient(circle at top left, rgba(255, 255, 255, 0.05), transparent 20%);
+  opacity: 0.95;
+}
+
+.dark body .fleet-card,
+.dark body .fleet-soft-card {
+  border-color: rgba(216, 180, 254, 0.12);
+  box-shadow:
+    0 18px 68px rgba(2, 6, 23, 0.56),
+    0 0 30px rgba(34, 211, 238, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.dark body .fleet-card::before,
+.dark body .fleet-soft-card::before {
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.06), transparent 22%),
+    radial-gradient(circle at 30% 10%, rgba(34, 211, 238, 0.12), transparent 52%),
+    radial-gradient(circle at 85% 80%, rgba(56, 189, 248, 0.06), transparent 50%);
+  opacity: 0.85;
+}
+
+.dark body .fleet-card:hover,
+.dark body .fleet-soft-card:hover {
+  border-color: rgba(196, 181, 253, 0.26);
+  box-shadow:
+    0 26px 86px rgba(2, 6, 23, 0.66),
+    0 0 44px rgba(34, 211, 238, 0.14),
+    0 0 26px rgba(56, 189, 248, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+.dark body .fleet-topbar-chip {
+  border-color: rgba(216, 180, 254, 0.14);
+  background:
+    linear-gradient(180deg, rgba(10, 12, 34, 0.78), rgba(3, 6, 20, 0.70));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.03),
+    0 12px 40px rgba(2, 6, 23, 0.55);
+}
+
+.dark body .fleet-topbar-chip:hover {
+  border-color: rgba(196, 181, 253, 0.24);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 18px 58px rgba(2, 6, 23, 0.60),
+    0 0 26px rgba(34, 211, 238, 0.12);
+}
+
+.dark body .fleet-topbar-chip[data-active="true"] {
+  border-color: rgba(196, 181, 253, 0.34);
+  background:
+    linear-gradient(180deg, rgba(34, 211, 238, 0.10), rgba(56, 189, 248, 0.08)),
+    rgba(15, 23, 42, 0.78);
+  box-shadow:
+    0 18px 60px rgba(34, 211, 238, 0.16),
+    0 0 34px rgba(56, 189, 248, 0.10),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.dark body .fleet-input {
+  background: linear-gradient(180deg, rgba(10, 12, 34, 0.72), rgba(3, 6, 20, 0.66)) !important;
+  border-color: rgba(216, 180, 254, 0.14) !important;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.014),
+    0 0 18px rgba(34, 211, 238, 0.05);
+}
+
+.dark body .fleet-input:focus-visible {
+  border-color: rgba(196, 181, 253, 0.36) !important;
+  box-shadow:
+    0 0 0 1px rgba(34, 211, 238, 0.14),
+    0 0 26px rgba(34, 211, 238, 0.18),
+    0 0 40px rgba(56, 189, 248, 0.08);
+}
+
+.dark body .fleet-status-pill,
+.dark body .fleet-tone-pill,
+.dark body .driver-chip {
+  box-shadow: 0 0 18px rgba(34, 211, 238, 0.10);
+}
+
+.dark body .fleet-nav-item svg,
+.dark body .fleet-topbar-chip svg {
+  filter: drop-shadow(0 0 8px rgba(34, 211, 238, 0.22));
+}
+
+.dark body .fleet-nav-item:hover {
+  border-color: rgba(216, 180, 254, 0.18);
+  background: rgba(34, 211, 238, 0.07);
+}
+
+/* Tables (shadcn/standard tables) */
+.dark body table {
+  border-color: rgba(216, 180, 254, 0.12);
+}
+
+.dark body thead tr {
+  border-color: rgba(216, 180, 254, 0.12);
+}
+
+.dark body th {
+  color: rgba(226, 232, 240, 0.80);
+}
+
+.dark body tbody tr {
+  border-color: rgba(216, 180, 254, 0.10);
+  transition: background-color 200ms ease, box-shadow 200ms ease;
+}
+
+.dark body tbody tr:hover {
+  background: rgba(34, 211, 238, 0.06);
+  box-shadow: 0 0 0 1px rgba(216, 180, 254, 0.10) inset;
+}
+
+.dark body td {
+  color: rgba(226, 232, 240, 0.86);
+}
+
+/* Global "neon" controls in dark mode (whole app) */
+.dark body [data-slot="card"] {
+  box-shadow:
+    0 0 0 1px rgba(196, 181, 253, 0.18) inset,
+    0 18px 70px rgba(2, 6, 23, 0.58),
+    0 0 34px rgba(34, 211, 238, 0.10),
+    0 0 18px rgba(167, 139, 250, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.dark body [data-slot="card"]:hover {
+  box-shadow:
+    0 0 0 1px rgba(196, 181, 253, 0.28) inset,
+    0 26px 86px rgba(2, 6, 23, 0.66),
+    0 0 44px rgba(34, 211, 238, 0.14),
+    0 0 26px rgba(56, 189, 248, 0.10),
+    inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+.dark body [data-slot="button"][data-variant="outline"],
+.dark body [data-slot="button"][data-variant="secondary"],
+.dark body [data-slot="badge"][data-variant="outline"],
+.dark body [data-slot="badge"][data-variant="secondary"] {
+  border-color: rgba(196, 181, 253, 0.22);
+}
+
+.dark body [data-slot="button"] {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 10px 34px rgba(2, 6, 23, 0.55);
+}
+
+.dark body [data-slot="button"][data-variant="default"] {
+  box-shadow:
+    0 18px 56px rgba(34, 211, 238, 0.14),
+    0 0 28px rgba(56, 189, 248, 0.10),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.dark body [data-slot="button"][data-variant="destructive"] {
+  box-shadow:
+    0 18px 56px rgba(248, 113, 113, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.dark body [data-slot="badge"] {
+  border-color: rgba(196, 181, 253, 0.16);
+  box-shadow: 0 0 20px rgba(34, 211, 238, 0.10);
+}
+
+.dark body [data-slot="badge"][data-variant="default"] {
+  box-shadow:
+    0 0 22px rgba(34, 211, 238, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+/* Fleet-specific cards: slightly stronger borders */
+.dark body .fleet-card,
+.dark body .fleet-soft-card {
+  border-color: rgba(196, 181, 253, 0.22);
+}
+
+.dark body .fleet-card:hover,
+.dark body .fleet-soft-card:hover {
+  border-color: rgba(196, 181, 253, 0.32);
 }
 
 @layer base {
@@ -123,47 +344,236 @@
   }
   body {
     @apply bg-background text-foreground;
-    font-family: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+    font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
   }
   html {
     @apply font-sans;
-    font-family: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+    font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
   }
 }
 
 @layer base {
-  body {
-    @apply bg-slate-950 text-slate-50;
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: var(--background);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 99px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--muted-foreground);
   }
 }
 
+html[data-accent="blue"] {
+  --primary: #3b82f6;
+  --ring: rgba(59, 130, 246, 0.55);
+  --chart-1: oklch(0.809 0.105 251.813);
+  --chart-2: oklch(0.623 0.214 259.815);
+  --chart-3: oklch(0.546 0.245 262.881);
+  --chart-4: oklch(0.488 0.243 264.376);
+  --chart-5: oklch(0.424 0.199 265.638);
+}
+
+html[data-accent="amber"] {
+  --primary: #f59e0b;
+  --ring: rgba(245, 158, 11, 0.55);
+  --chart-1: oklch(0.769 0.173 70.08);
+  --chart-2: oklch(0.79 0.13 85.87);
+  --chart-3: oklch(0.704 0.19 42.19);
+  --chart-4: oklch(0.646 0.21 35.27);
+  --chart-5: oklch(0.598 0.2 27.33);
+}
+
 @layer utilities {
+  .glass {
+    background: rgba(255, 255, 255, 0.04);
+    backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+  }
+
+  .mesh-gradient {
+    background-image:
+      radial-gradient(ellipse at 20% 20%, rgba(59, 130, 246, 0.06) 0%, transparent 50%),
+      radial-gradient(ellipse at 80% 80%, rgba(139, 92, 246, 0.04) 0%, transparent 50%),
+      radial-gradient(ellipse at 50% 50%, rgba(16, 185, 129, 0.02) 0%, transparent 60%);
+  }
+
   .fleet-app {
     position: relative;
     isolation: isolate;
-    --background: #030712;
-    --foreground: #e5f7ff;
-    --card: #07101f;
-    --card-foreground: #e5f7ff;
-    --popover: #07101f;
-    --popover-foreground: #e5f7ff;
-    --primary: #67e8f9;
-    --primary-foreground: #04111f;
-    --secondary: rgba(15, 23, 42, 0.82);
-    --secondary-foreground: #e5f7ff;
-    --muted: rgba(15, 23, 42, 0.76);
-    --muted-foreground: #94a3b8;
-    --accent: rgba(76, 29, 149, 0.38);
-    --accent-foreground: #f5f3ff;
-    --border: rgba(103, 232, 249, 0.14);
-    --input: rgba(103, 232, 249, 0.16);
-    --ring: rgba(139, 92, 246, 0.5);
-    font-family: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
-    color: #dff7ff;
+    font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
     background:
-      radial-gradient(circle at top center, rgba(139, 92, 246, 0.12), transparent 28%),
-      linear-gradient(180deg, rgba(2, 6, 23, 0.78), rgba(2, 6, 23, 0.92)),
-      linear-gradient(90deg, transparent 0%, rgba(34, 211, 238, 0.03) 42%, rgba(168, 85, 247, 0.04) 68%, transparent 100%);
+      radial-gradient(circle at 14% 8%, color-mix(in oklab, var(--primary) 10%, transparent), transparent 46%),
+      radial-gradient(circle at 86% 12%, color-mix(in oklab, var(--primary) 7%, transparent), transparent 52%);
+  }
+
+  .fleet-page-bg {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: -10;
+    background:
+      radial-gradient(circle at 14% 8%, color-mix(in oklab, var(--primary) 10%, transparent), transparent 46%),
+      radial-gradient(circle at 86% 12%, color-mix(in oklab, var(--primary) 7%, transparent), transparent 52%),
+      radial-gradient(circle at 72% 88%, color-mix(in oklab, var(--primary) 6%, transparent), transparent 56%),
+      radial-gradient(circle at 20% 88%, color-mix(in oklab, var(--primary) 5%, transparent), transparent 58%),
+      linear-gradient(180deg, color-mix(in oklab, var(--background) 90%, transparent), var(--background));
+    opacity: 1;
+  }
+
+  .fleet-page-bg::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(1200px 700px at 12% 12%, rgba(0,0,0,0.35), transparent 60%),
+      radial-gradient(1000px 600px at 88% 18%, rgba(0,0,0,0.32), transparent 62%),
+      radial-gradient(1200px 700px at 50% 92%, rgba(0,0,0,0.38), transparent 58%),
+      linear-gradient(135deg, rgba(0,0,0,0.46), transparent 55%);
+    opacity: 0.65;
+  }
+
+  .fleet-page-bg::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    opacity: 0.02;
+    background-image:
+      radial-gradient(circle at 20% 20%, color-mix(in oklab, var(--foreground) 26%, transparent) 0.6px, transparent 0.9px),
+      radial-gradient(circle at 70% 55%, color-mix(in oklab, var(--foreground) 20%, transparent) 0.7px, transparent 1px);
+    background-size: 240px 240px, 320px 320px;
+    mix-blend-mode: overlay;
+  }
+
+  .fleet-sidebar {
+    border: 1px solid color-mix(in oklab, var(--foreground) 12%, transparent);
+    background:
+      linear-gradient(
+        180deg,
+        color-mix(in oklab, var(--card) 84%, transparent),
+        color-mix(in oklab, var(--background) 92%, transparent)
+      );
+    box-shadow:
+      0 24px 80px color-mix(in oklab, var(--background) 65%, transparent),
+      inset 0 1px 0 color-mix(in oklab, var(--foreground) 7%, transparent);
+    backdrop-filter: blur(18px);
+  }
+
+  .fleet-nav-item {
+    border: 1px solid transparent;
+    background: transparent;
+    color: color-mix(in oklab, var(--foreground) 88%, transparent);
+    transition: background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease, color 160ms ease;
+  }
+
+  .fleet-nav-item:hover {
+    border-color: color-mix(in oklab, var(--foreground) 12%, transparent);
+    background: color-mix(in oklab, var(--foreground) 4%, transparent);
+    color: var(--foreground);
+  }
+
+  .fleet-nav-item[data-active="true"] {
+    border-color: color-mix(in oklab, var(--foreground) 14%, transparent);
+    background:
+      linear-gradient(
+        90deg,
+        color-mix(in oklab, var(--primary) 16%, transparent),
+        color-mix(in oklab, var(--primary) 10%, transparent)
+      );
+    box-shadow:
+      inset 0 1px 0 color-mix(in oklab, var(--foreground) 7%, transparent);
+    color: var(--foreground);
+    font-weight: 700;
+  }
+
+  .fleet-nav-item[data-active="true"][data-tone="vehicles"] {
+    border-color: color-mix(in oklab, oklch(0.66 0.16 302) 30%, transparent);
+    background: linear-gradient(
+      90deg,
+      color-mix(in oklab, oklch(0.66 0.16 302) 24%, transparent),
+      color-mix(in oklab, oklch(0.66 0.16 302) 14%, transparent)
+    );
+    box-shadow:
+      0 0 0 1px color-mix(in oklab, oklch(0.66 0.16 302) 18%, transparent) inset,
+      0 18px 60px color-mix(in oklab, oklch(0.66 0.16 302) 14%, transparent),
+      0 0 28px rgba(34, 211, 238, 0.16);
+  }
+
+  .fleet-nav-item[data-active="true"][data-tone="reports"] {
+    border-color: color-mix(in oklab, oklch(0.74 0.16 155) 22%, transparent);
+    background: linear-gradient(
+      90deg,
+      color-mix(in oklab, oklch(0.74 0.16 155) 18%, transparent),
+      color-mix(in oklab, oklch(0.74 0.16 155) 11%, transparent)
+    );
+  }
+
+  .fleet-nav-item[data-active="true"][data-tone="contacts"] {
+    border-color: color-mix(in oklab, oklch(0.78 0.16 80) 22%, transparent);
+    background: linear-gradient(
+      90deg,
+      color-mix(in oklab, oklch(0.78 0.16 80) 18%, transparent),
+      color-mix(in oklab, oklch(0.78 0.16 80) 11%, transparent)
+    );
+  }
+
+  .fleet-nav-group {
+    border: 1px solid color-mix(in oklab, var(--foreground) 10%, transparent);
+    background: color-mix(in oklab, var(--foreground) 4%, transparent);
+    color: color-mix(in oklab, var(--foreground) 70%, transparent);
+    transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+  }
+
+  .fleet-nav-group:hover {
+    background: color-mix(in oklab, var(--foreground) 6%, transparent);
+    color: var(--foreground);
+  }
+
+  .fleet-status-pill {
+    --pill: var(--primary);
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    border-radius: 9999px;
+    padding: 0.2rem 0.55rem;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    border: 1px solid color-mix(in oklab, var(--pill) 26%, transparent);
+    background: color-mix(in oklab, var(--pill) 14%, transparent);
+    color: color-mix(in oklab, var(--pill) 85%, white);
+  }
+
+  .fleet-status-pill[data-tone="ok"] { --pill: oklch(0.74 0.16 155); }
+  .fleet-status-pill[data-tone="warn"] { --pill: oklch(0.78 0.16 80); }
+  .fleet-status-pill[data-tone="neutral"] { --pill: color-mix(in oklab, var(--foreground) 55%, transparent); }
+
+  .fleet-topbar-chip {
+    height: 36px;
+    border-radius: 9999px;
+    border: 1px solid color-mix(in oklab, var(--foreground) 12%, transparent);
+    background: color-mix(in oklab, var(--foreground) 4%, transparent);
+    box-shadow: inset 0 1px 0 color-mix(in oklab, var(--foreground) 7%, transparent);
+    backdrop-filter: blur(14px);
+    transition: background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+  }
+
+  .fleet-topbar-chip:hover {
+    background: color-mix(in oklab, var(--foreground) 6%, transparent);
+    border-color: color-mix(in oklab, var(--foreground) 16%, transparent);
+  }
+
+  .fleet-topbar-chip[data-active="true"] {
+    border-color: color-mix(in oklab, var(--primary) 28%, transparent);
+    background: color-mix(in oklab, var(--primary) 12%, transparent);
+    box-shadow:
+      0 18px 60px color-mix(in oklab, var(--primary) 10%, transparent),
+      inset 0 1px 0 color-mix(in oklab, var(--foreground) 8%, transparent);
   }
 
   .fleet-app::before {
@@ -172,8 +582,8 @@
     inset: 0;
     pointer-events: none;
     background:
-      radial-gradient(circle at 50% 0%, rgba(34, 211, 238, 0.09), transparent 32%),
-      radial-gradient(circle at 50% 100%, rgba(168, 85, 247, 0.08), transparent 28%);
+      radial-gradient(circle at 25% 15%, color-mix(in oklab, var(--primary) 10%, transparent), transparent 40%),
+      radial-gradient(circle at 80% 55%, color-mix(in oklab, var(--primary) 7%, transparent), transparent 44%);
     z-index: -2;
   }
 
@@ -182,12 +592,12 @@
     position: fixed;
     inset: 0;
     pointer-events: none;
-    opacity: 0.045;
+    opacity: 0.035;
     background-image:
-      radial-gradient(circle at 20% 20%, rgba(255,255,255,0.22) 0.6px, transparent 0.8px),
-      radial-gradient(circle at 80% 35%, rgba(103,232,249,0.18) 0.7px, transparent 0.9px),
-      radial-gradient(circle at 60% 75%, rgba(255,255,255,0.18) 0.6px, transparent 0.8px);
-    background-size: 160px 160px, 220px 220px, 260px 260px;
+      radial-gradient(circle at 20% 20%, color-mix(in oklab, var(--foreground) 26%, transparent) 0.6px, transparent 0.8px),
+      radial-gradient(circle at 80% 35%, color-mix(in oklab, var(--foreground) 18%, transparent) 0.7px, transparent 0.9px),
+      radial-gradient(circle at 60% 75%, color-mix(in oklab, var(--foreground) 22%, transparent) 0.6px, transparent 0.8px);
+    background-size: 220px 220px, 280px 280px, 340px 340px;
     z-index: -1;
   }
 
@@ -196,8 +606,8 @@
     /* Allow nav dropdowns to render above the bar. */
     overflow: visible;
     box-shadow:
-      0 8px 32px rgba(2, 6, 23, 0.36),
-      inset 0 -1px 0 rgba(103, 232, 249, 0.08);
+      0 16px 50px color-mix(in oklab, var(--background) 55%, transparent),
+      inset 0 -1px 0 color-mix(in oklab, var(--foreground) 10%, transparent);
   }
 
   .fleet-topbar::before {
@@ -206,21 +616,25 @@
     inset: 0;
     pointer-events: none;
     background:
-      linear-gradient(90deg, transparent 0%, rgba(34, 211, 238, 0.08) 18%, rgba(168, 85, 247, 0.07) 50%, rgba(34, 211, 238, 0.08) 82%, transparent 100%),
-      linear-gradient(180deg, rgba(255,255,255,0.02), transparent 70%);
+      linear-gradient(
+        90deg,
+        transparent 0%,
+        color-mix(in oklab, var(--primary) 12%, transparent) 24%,
+        color-mix(in oklab, var(--primary) 8%, transparent) 55%,
+        color-mix(in oklab, var(--primary) 10%, transparent) 80%,
+        transparent 100%
+      ),
+      linear-gradient(180deg, color-mix(in oklab, var(--foreground) 4%, transparent), transparent 70%);
   }
 
   .fleet-shell {
     position: relative;
-    border: 1px solid rgba(103, 232, 249, 0.10);
+    border: 1px solid color-mix(in oklab, var(--foreground) 12%, transparent);
     border-radius: 2rem;
-    background: linear-gradient(180deg, rgba(4, 10, 24, 0.32), rgba(4, 10, 24, 0.18));
+    background: color-mix(in oklab, var(--background) 76%, transparent);
     box-shadow:
-      inset 0 0 0 1px rgba(255,255,255,0.015),
-      0 0 0 1px rgba(34,211,238,0.04),
-      0 0 40px rgba(34,211,238,0.08),
-      0 0 90px rgba(56,189,248,0.06),
-      0 0 120px rgba(139,92,246,0.06);
+      0 24px 70px color-mix(in oklab, var(--background) 55%, transparent),
+      inset 0 1px 0 color-mix(in oklab, var(--foreground) 8%, transparent);
     overflow: hidden;
   }
 
@@ -230,9 +644,14 @@
     inset: 0;
     pointer-events: none;
     background:
-      linear-gradient(135deg, rgba(34,211,238,0.07), transparent 18%, transparent 82%, rgba(168,85,247,0.06)),
-      radial-gradient(circle at top left, rgba(255,255,255,0.06), transparent 18%),
-      radial-gradient(circle at bottom right, rgba(34,211,238,0.08), transparent 20%);
+      linear-gradient(
+        135deg,
+        color-mix(in oklab, var(--primary) 12%, transparent),
+        transparent 24%,
+        transparent 76%,
+        color-mix(in oklab, var(--primary) 8%, transparent)
+      ),
+      radial-gradient(circle at top left, color-mix(in oklab, var(--foreground) 7%, transparent), transparent 20%);
     mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
     -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
     padding: 1px;
@@ -242,11 +661,18 @@
   }
 
   .fleet-heading {
-    background: linear-gradient(90deg, #ecfeff 0%, #a5f3fc 28%, #7dd3fc 62%, #c4b5fd 100%);
+    background: linear-gradient(
+      90deg,
+      color-mix(in oklab, var(--foreground) 98%, transparent) 0%,
+      color-mix(in oklab, var(--primary) 86%, transparent) 55%,
+      color-mix(in oklab, var(--primary) 70%, transparent) 100%
+    );
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
-    text-shadow: 0 0 32px rgba(34, 211, 238, 0.08);
+    text-shadow:
+      0 1px 0 color-mix(in oklab, var(--background) 35%, transparent),
+      0 16px 60px color-mix(in oklab, var(--primary) 10%, transparent);
   }
 
 
@@ -255,11 +681,11 @@
   .fleet-app [data-slot="card-description"],
   .fleet-app label,
   .fleet-app .text-card-foreground {
-    color: #dff7ff;
+    color: var(--foreground);
   }
 
   .fleet-app .text-muted-foreground {
-    color: #94a3b8;
+    color: var(--muted-foreground);
   }
 
   .fleet-app .text-slate-500 {
@@ -287,28 +713,68 @@
   .fleet-soft-card {
     position: relative;
     overflow: hidden;
-    transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
-    backdrop-filter: blur(18px);
+    isolation: isolate;
+    transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease, background-color 160ms ease;
+    backdrop-filter: blur(14px);
+  }
+
+  .fleet-tint {
+    --tint: var(--primary);
+  }
+
+  .fleet-tint::before {
+    background:
+      linear-gradient(135deg, color-mix(in oklab, var(--foreground) 7%, transparent), transparent 22%),
+      radial-gradient(circle at 22% 12%, color-mix(in oklab, var(--tint) 18%, transparent), transparent 60%),
+      linear-gradient(180deg, color-mix(in oklab, var(--tint) 7%, transparent), transparent 58%);
+  }
+
+  .fleet-tint-blue { --tint: oklch(0.66 0.14 252); }
+  .fleet-tint-emerald { --tint: oklch(0.74 0.16 155); }
+  .fleet-tint-amber { --tint: oklch(0.78 0.16 80); }
+  .fleet-tint-violet { --tint: oklch(0.66 0.16 302); }
+
+  .fleet-stat-icon {
+    border: 1px solid color-mix(in oklab, var(--tint) 26%, transparent);
+    background: color-mix(in oklab, var(--tint) 16%, transparent);
+    box-shadow: 0 12px 34px color-mix(in oklab, var(--tint) 18%, transparent);
+  }
+
+  .fleet-stat-value {
+    background: linear-gradient(
+      90deg,
+      color-mix(in oklab, var(--foreground) 96%, transparent),
+      color-mix(in oklab, var(--tint) 72%, transparent)
+    );
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
   }
 
   .fleet-card {
-    background: linear-gradient(180deg, rgba(8, 15, 33, 0.72), rgba(3, 8, 22, 0.82));
-    border: 1px solid rgba(103, 232, 249, 0.14);
+    background:
+      linear-gradient(
+        180deg,
+        color-mix(in oklab, var(--card) 92%, transparent),
+        color-mix(in oklab, var(--card) 78%, transparent)
+      );
+    border: 1px solid color-mix(in oklab, var(--foreground) 12%, transparent);
     box-shadow:
-      0 0 0 1px rgba(255, 255, 255, 0.018) inset,
-      0 0 30px rgba(34, 211, 238, 0.10),
-      0 0 70px rgba(56, 189, 248, 0.07),
-      0 0 90px rgba(139, 92, 246, 0.05),
-      0 18px 60px rgba(2, 6, 23, 0.42);
+      0 18px 60px color-mix(in oklab, var(--background) 55%, transparent),
+      inset 0 1px 0 color-mix(in oklab, var(--foreground) 7%, transparent);
   }
 
   .fleet-soft-card {
-    background: linear-gradient(180deg, rgba(4, 12, 28, 0.88), rgba(3, 8, 20, 0.78));
-    border: 1px solid rgba(103, 232, 249, 0.12);
+    background:
+      linear-gradient(
+        180deg,
+        color-mix(in oklab, var(--background) 86%, transparent),
+        color-mix(in oklab, var(--background) 78%, transparent)
+      );
+    border: 1px solid color-mix(in oklab, var(--foreground) 10%, transparent);
     box-shadow:
-      inset 0 0 0 1px rgba(255, 255, 255, 0.018),
-      0 0 20px rgba(34, 211, 238, 0.08),
-      0 12px 36px rgba(2, 6, 23, 0.28);
+      0 12px 36px color-mix(in oklab, var(--background) 45%, transparent),
+      inset 0 1px 0 color-mix(in oklab, var(--foreground) 6%, transparent);
   }
 
   .fleet-card::before,
@@ -316,32 +782,23 @@
     content: "";
     position: absolute;
     inset: 0;
+    z-index: -1;
     pointer-events: none;
     background:
-      linear-gradient(135deg, rgba(255,255,255,0.06), transparent 18%),
-      linear-gradient(90deg, transparent, rgba(34, 211, 238, 0.06), rgba(168,85,247,0.045), transparent);
+      linear-gradient(135deg, color-mix(in oklab, var(--foreground) 7%, transparent), transparent 22%),
+      radial-gradient(circle at 30% 10%, color-mix(in oklab, var(--primary) 10%, transparent), transparent 48%);
+    opacity: 0.75;
   }
 
-  .fleet-card::after {
-    content: "";
-    position: absolute;
-    left: 18px;
-    right: 18px;
-    top: 0;
-    height: 1px;
-    background: linear-gradient(90deg, transparent, rgba(103,232,249,0.7), rgba(196,181,253,0.55), transparent);
-    box-shadow: 0 0 18px rgba(34,211,238,0.28);
-    pointer-events: none;
-  }
+  /* (no child selector override; keep absolute-positioned badges working) */
 
   .fleet-card:hover,
   .fleet-soft-card:hover {
     transform: translateY(-2px);
-    border-color: rgba(103, 232, 249, 0.22);
     box-shadow:
-      0 18px 60px rgba(2, 6, 23, 0.5),
-      0 0 28px rgba(34, 211, 238, 0.16),
-      0 0 72px rgba(56, 189, 248, 0.08);
+      0 22px 70px color-mix(in oklab, var(--background) 62%, transparent),
+      inset 0 1px 0 color-mix(in oklab, var(--foreground) 9%, transparent);
+    border-color: color-mix(in oklab, var(--primary) 22%, transparent);
   }
 
   .fleet-stat-card {
@@ -349,7 +806,6 @@
     min-height: 176px;
     height: 100%;
     flex-direction: column;
-    animation: glowPulse 6.5s ease-in-out infinite;
   }
 
   .fleet-stat-card > [data-slot="card-header"] {
@@ -391,28 +847,33 @@
 
   .fleet-action-btn {
     overflow: visible;
-    border-color: rgba(103, 232, 249, 0.16) !important;
-    background: linear-gradient(180deg, rgba(8, 17, 38, 0.88), rgba(4, 10, 24, 0.84)) !important;
-    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.018), 0 0 22px rgba(34,211,238,0.10), 0 0 34px rgba(139,92,246,0.08);
+    border-color: color-mix(in oklab, var(--foreground) 14%, transparent) !important;
+    background: color-mix(in oklab, var(--background) 86%, transparent) !important;
+    box-shadow:
+      0 14px 40px color-mix(in oklab, var(--background) 55%, transparent),
+      inset 0 1px 0 color-mix(in oklab, var(--foreground) 7%, transparent);
   }
 
   .fleet-primary-btn {
     overflow: hidden;
-    border: 1px solid rgba(103, 232, 249, 0.28) !important;
-    background: linear-gradient(180deg, rgba(8, 31, 53, 0.94), rgba(10, 21, 46, 0.92)) !important;
-    color: #ecfeff !important;
+    border: 1px solid color-mix(in oklab, var(--primary) 34%, transparent) !important;
+    background:
+      linear-gradient(
+        180deg,
+        color-mix(in oklab, var(--primary) 24%, var(--background)),
+        color-mix(in oklab, var(--primary) 12%, var(--background))
+      ) !important;
+    color: var(--primary-foreground) !important;
     box-shadow:
-      inset 0 0 0 1px rgba(255,255,255,0.03),
-      0 0 30px rgba(34,211,238,0.22),
-      0 0 70px rgba(56,189,248,0.12),
-      0 0 84px rgba(139,92,246,0.10);
+      0 18px 60px color-mix(in oklab, var(--background) 60%, transparent),
+      inset 0 1px 0 color-mix(in oklab, var(--foreground) 8%, transparent);
   }
 
   .fleet-input {
-    background: linear-gradient(180deg, rgba(2, 8, 23, 0.82), rgba(3, 10, 25, 0.68)) !important;
-    border: 1px solid rgba(103, 232, 249, 0.16) !important;
-    color: white !important;
-    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.018), 0 0 0 rgba(34, 211, 238, 0);
+    background: color-mix(in oklab, var(--background) 86%, transparent) !important;
+    border: 1px solid color-mix(in oklab, var(--foreground) 12%, transparent) !important;
+    color: var(--foreground) !important;
+    box-shadow: inset 0 1px 0 color-mix(in oklab, var(--foreground) 6%, transparent);
   }
 
   .fleet-input::placeholder {
@@ -420,24 +881,21 @@
   }
 
   .fleet-input:focus-visible {
-    border-color: rgba(103, 232, 249, 0.42) !important;
+    border-color: color-mix(in oklab, var(--primary) 42%, transparent) !important;
     box-shadow:
-      0 0 0 1px rgba(103, 232, 249, 0.12),
-      0 0 28px rgba(34, 211, 238, 0.16),
-      0 0 54px rgba(56, 189, 248, 0.08);
+      0 0 0 1px color-mix(in oklab, var(--primary) 18%, transparent),
+      0 0 0 3px color-mix(in oklab, var(--primary) 18%, transparent);
   }
 
   .fleet-progress {
     overflow: hidden;
-    border: 1px solid rgba(103,232,249,0.10);
-    background: rgba(2, 8, 23, 0.72);
-    box-shadow: inset 0 0 12px rgba(2, 6, 23, 0.45);
+    border: 1px solid color-mix(in oklab, var(--foreground) 10%, transparent);
+    background: color-mix(in oklab, var(--muted) 80%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--foreground) 5%, transparent);
   }
 
   .fleet-progress > div {
-    background: linear-gradient(90deg, rgba(103,232,249,0.92), rgba(56,189,248,0.92), rgba(168,85,247,0.88));
-    box-shadow: 0 0 16px rgba(34,211,238,0.45), 0 0 24px rgba(56,189,248,0.22);
-    animation: progressGlow 3.4s ease-in-out infinite;
+    background: var(--primary);
   }
 
   .fleet-vehicle-item {
@@ -454,16 +912,15 @@
     bottom: 16px;
     width: 3px;
     border-radius: 9999px;
-    background: rgba(103, 232, 249, 0.2);
-    box-shadow: 0 0 16px rgba(103, 232, 249, 0.18);
+    background: color-mix(in oklab, var(--primary) 35%, transparent);
+    box-shadow: 0 0 0 1px color-mix(in oklab, var(--primary) 18%, transparent);
   }
 
   .fleet-vehicle-active {
     transform: translateY(-1px);
     box-shadow:
-      0 0 0 1px rgba(34, 211, 238, 0.12) inset,
-      0 0 24px rgba(34, 211, 238, 0.24),
-      0 0 60px rgba(56, 189, 248, 0.08);
+      0 0 0 1px color-mix(in oklab, var(--primary) 18%, transparent) inset,
+      0 18px 60px color-mix(in oklab, var(--background) 60%, transparent);
   }
 
   .fleet-vehicle-ok { border-color: rgba(34, 197, 94, 0.16); }
@@ -533,9 +990,15 @@
     height: 86px;
     border-radius: 9999px;
     background:
-      radial-gradient(circle at center, rgba(5, 15, 30, 0.98) 56%, transparent 57%),
-      conic-gradient(from 180deg, rgba(34, 211, 238, 0.96) calc(var(--score) * 1%), rgba(139, 92, 246, 0.24) 0);
-    box-shadow: 0 0 24px rgba(34, 211, 238, 0.2), inset 0 0 0 1px rgba(255,255,255,0.03);
+      radial-gradient(circle at center, color-mix(in oklab, var(--card) 92%, transparent) 56%, transparent 57%),
+      conic-gradient(
+        from 180deg,
+        color-mix(in oklab, var(--primary) 95%, transparent) calc(var(--score) * 1%),
+        color-mix(in oklab, var(--primary) 18%, transparent) 0
+      );
+    box-shadow:
+      0 18px 55px color-mix(in oklab, var(--background) 62%, transparent),
+      inset 0 0 0 1px color-mix(in oklab, var(--foreground) 8%, transparent);
   }
 
   .fleet-health-ring__inner {
@@ -544,13 +1007,17 @@
     width: 62px;
     height: 62px;
     border-radius: 9999px;
-    background: radial-gradient(circle, rgba(2, 8, 23, 0.98), rgba(5, 15, 30, 0.92));
-    box-shadow: inset 0 0 20px rgba(34, 211, 238, 0.12);
+    background: radial-gradient(
+      circle,
+      color-mix(in oklab, var(--background) 92%, transparent),
+      color-mix(in oklab, var(--background) 82%, transparent)
+    );
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--foreground) 8%, transparent);
   }
 
   .fleet-timeline-item {
     position: relative;
-    border-left: 1px solid rgba(103, 232, 249, 0.16);
+    border-left: 1px solid color-mix(in oklab, var(--foreground) 12%, transparent);
     margin-left: 0.45rem;
     padding: 0 0 0.95rem 1.15rem;
   }
@@ -558,9 +1025,16 @@
   .fleet-timeline-content {
     min-width: 0;
     border-radius: 1.15rem;
-    border: 1px solid rgba(103, 232, 249, 0.12);
-    background: linear-gradient(180deg, rgba(5, 15, 30, 0.76), rgba(2, 8, 23, 0.88));
-    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.018), 0 0 20px rgba(34, 211, 238, 0.08);
+    border: 1px solid color-mix(in oklab, var(--foreground) 10%, transparent);
+    background:
+      linear-gradient(
+        180deg,
+        color-mix(in oklab, var(--card) 92%, transparent),
+        color-mix(in oklab, var(--card) 80%, transparent)
+      );
+    box-shadow:
+      0 14px 48px color-mix(in oklab, var(--background) 58%, transparent),
+      inset 0 1px 0 color-mix(in oklab, var(--foreground) 6%, transparent);
     padding: 0.95rem 1rem;
   }
 
@@ -614,8 +1088,8 @@
 
   .fleet-timeline-km {
     color: #cffafe;
-    background: rgba(34, 211, 238, 0.12);
-    border: 1px solid rgba(103, 232, 249, 0.22);
+    background: rgba(34, 211, 238, 0.10);
+    border: 1px solid rgba(196, 181, 253, 0.22);
   }
 
   .fleet-timeline-dot {
@@ -640,19 +1114,19 @@
   .fleet-doc-btn {
     position: relative;
     overflow: hidden;
-    border: 1px solid rgba(103, 232, 249, 0.16) !important;
+    border: 1px solid rgba(196, 181, 253, 0.16) !important;
     background: linear-gradient(180deg, rgba(8, 17, 38, 0.86), rgba(4, 10, 24, 0.84)) !important;
     color: #effbff !important;
     box-shadow: inset 0 0 0 1px rgba(255,255,255,0.018), 0 0 18px rgba(34,211,238,0.08), 0 0 26px rgba(139,92,246,0.06);
   }
 
   .fleet-doc-btn:hover {
-    border-color: rgba(103, 232, 249, 0.26) !important;
+    border-color: rgba(196, 181, 253, 0.26) !important;
     box-shadow: inset 0 0 0 1px rgba(255,255,255,0.022), 0 0 24px rgba(34,211,238,0.14), 0 0 34px rgba(139,92,246,0.08);
   }
 
   .fleet-doc-btn--primary {
-    border-color: rgba(103, 232, 249, 0.28) !important;
+    border-color: rgba(196, 181, 253, 0.28) !important;
     background: linear-gradient(180deg, rgba(9, 31, 55, 0.94), rgba(16, 18, 48, 0.92)) !important;
   }
 
@@ -710,7 +1184,7 @@
     color: #d7f6ff !important;
     border-color: rgba(125, 211, 252, 0.32) !important;
     background:
-      linear-gradient(180deg, rgba(34, 211, 238, 0.10), rgba(168, 85, 247, 0.12)),
+      linear-gradient(180deg, rgba(34, 211, 238, 0.10), rgba(56, 189, 248, 0.08)),
       rgba(15, 23, 42, 0.86) !important;
     box-shadow:
       0 0 18px rgba(34, 211, 238, 0.12),
@@ -727,7 +1201,7 @@
     border: 1px solid rgba(167, 139, 250, 0.24) !important;
     background:
       linear-gradient(180deg, rgba(10, 14, 34, 0.98), rgba(4, 8, 24, 0.98)),
-      radial-gradient(circle at top right, rgba(168, 85, 247, 0.18), transparent 36%),
+      radial-gradient(circle at top right, rgba(56, 189, 248, 0.16), transparent 36%),
       radial-gradient(circle at top left, rgba(34, 211, 238, 0.10), transparent 28%) !important;
     color: #eefbff !important;
     border-radius: 1.5rem !important;
@@ -744,7 +1218,7 @@
     position: absolute;
     inset: 0;
     pointer-events: none;
-    background: linear-gradient(135deg, rgba(255,255,255,0.06), transparent 26%, transparent 72%, rgba(168,85,247,0.10));
+    background: linear-gradient(135deg, rgba(255,255,255,0.06), transparent 26%, transparent 72%, rgba(34,211,238,0.10));
     opacity: 0.9;
   }
 
@@ -757,7 +1231,7 @@
   .fleet-dialog h2,
   .fleet-dialog h3 {
     color: #f5f3ff !important;
-    text-shadow: 0 0 18px rgba(168, 85, 247, 0.14);
+    text-shadow: 0 0 18px rgba(34, 211, 238, 0.12);
   }
 
   .fleet-dialog [data-slot="dialog-description"] {
@@ -791,7 +1265,7 @@
     position: absolute;
     inset: 0;
     pointer-events: none;
-    background: linear-gradient(135deg, rgba(255,255,255,0.08), transparent 34%, transparent 72%, rgba(168,85,247,0.12));
+    background: linear-gradient(135deg, rgba(255,255,255,0.08), transparent 34%, transparent 72%, rgba(34,211,238,0.12));
   }
 
   .fleet-dialog-btn--ghost {
@@ -804,19 +1278,19 @@
     background: linear-gradient(180deg, rgba(91, 33, 182, 0.96), rgba(67, 56, 202, 0.92)) !important;
     color: #f8fbff !important;
     border-color: rgba(196, 181, 253, 0.24) !important;
-    box-shadow: 0 0 24px rgba(139, 92, 246, 0.26), 0 0 48px rgba(168, 85, 247, 0.14);
+    box-shadow: 0 0 24px rgba(34, 211, 238, 0.14), 0 0 48px rgba(56, 189, 248, 0.10);
   }
 
   .fleet-dialog-btn--danger {
     background: linear-gradient(180deg, rgba(91, 33, 182, 0.94), rgba(76, 29, 149, 0.90)) !important;
     color: #fff1ff !important;
     border-color: rgba(216, 180, 254, 0.28) !important;
-    box-shadow: 0 0 24px rgba(168, 85, 247, 0.24), 0 0 48px rgba(236, 72, 153, 0.10);
+    box-shadow: 0 0 24px rgba(34, 211, 238, 0.14), 0 0 48px rgba(56, 189, 248, 0.10);
   }
 
   .fleet-dialog-btn:hover {
     transform: translateY(-1px);
-    box-shadow: 0 0 28px rgba(139, 92, 246, 0.24), 0 0 54px rgba(168, 85, 247, 0.12);
+    box-shadow: 0 0 28px rgba(34, 211, 238, 0.16), 0 0 54px rgba(56, 189, 248, 0.12);
   }
 
   /* === Driver-only UI utilities (scoped by class name) === */
@@ -825,14 +1299,14 @@
     --driver-surface: rgba(2, 8, 23, 0.72);
     --driver-surface-2: rgba(3, 10, 25, 0.68);
     --driver-border: rgba(255, 255, 255, 0.10);
-    --driver-border-strong: rgba(103, 232, 249, 0.20);
+    --driver-border-strong: rgba(196, 181, 253, 0.22);
     --driver-text: #f2fbff;
     --driver-muted: #9eb3cd;
     --driver-accent: #22d3ee;
-    --driver-accent-2: #a855f7;
+    --driver-accent-2: #38bdf8;
     background:
-      radial-gradient(circle at 20% 0%, rgba(34, 211, 238, 0.10), transparent 40%),
-      radial-gradient(circle at 90% 10%, rgba(168, 85, 247, 0.10), transparent 38%),
+      radial-gradient(circle at 20% 0%, rgba(34, 211, 238, 0.12), transparent 40%),
+      radial-gradient(circle at 90% 10%, rgba(56, 189, 248, 0.10), transparent 38%),
       linear-gradient(180deg, rgba(2, 6, 23, 0.88), rgba(2, 6, 23, 0.98)),
       var(--driver-bg);
     color: var(--driver-text);
@@ -848,10 +1322,10 @@
 
   .driver-hero {
     background:
-      radial-gradient(circle at 20% 10%, rgba(34, 211, 238, 0.11), transparent 42%),
-      radial-gradient(circle at 90% 30%, rgba(168, 85, 247, 0.10), transparent 38%),
+      radial-gradient(circle at 20% 10%, rgba(34, 211, 238, 0.12), transparent 42%),
+      radial-gradient(circle at 90% 30%, rgba(56, 189, 248, 0.10), transparent 38%),
       linear-gradient(180deg, rgba(8, 17, 38, 0.82), rgba(2, 8, 23, 0.88));
-    border: 1px solid rgba(103, 232, 249, 0.16);
+    border: 1px solid rgba(196, 181, 253, 0.16);
     box-shadow:
       inset 0 0 0 1px rgba(255, 255, 255, 0.018),
       0 0 36px rgba(34, 211, 238, 0.10),
@@ -861,7 +1335,7 @@
   .driver-input {
     min-height: 44px;
     background: linear-gradient(180deg, var(--driver-surface), var(--driver-surface-2)) !important;
-    border: 1px solid rgba(103, 232, 249, 0.16) !important;
+    border: 1px solid rgba(196, 181, 253, 0.16) !important;
     color: #ffffff !important;
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.014);
   }
@@ -872,16 +1346,16 @@
 
   .driver-input:focus-visible {
     outline: none;
-    border-color: rgba(103, 232, 249, 0.42) !important;
+    border-color: rgba(196, 181, 253, 0.42) !important;
     box-shadow:
-      0 0 0 1px rgba(103, 232, 249, 0.14),
+      0 0 0 1px rgba(34, 211, 238, 0.14),
       0 0 24px rgba(34, 211, 238, 0.14);
   }
 
   .driver-cta {
     min-height: 44px;
     border-radius: 1rem;
-    border: 1px solid rgba(103, 232, 249, 0.24) !important;
+    border: 1px solid rgba(196, 181, 253, 0.22) !important;
     background: linear-gradient(180deg, rgba(8, 31, 53, 0.94), rgba(10, 21, 46, 0.92)) !important;
     color: #ecfeff !important;
     box-shadow:
@@ -912,12 +1386,12 @@
 
   .driver-cta--active {
     border-color: rgba(196, 181, 253, 0.78) !important; /* violet-200-ish */
-    outline: 2px solid rgba(168, 85, 247, 0.42);
+    outline: 2px solid rgba(34, 211, 238, 0.32);
     outline-offset: 2px;
     box-shadow:
       inset 0 0 0 1px rgba(255, 255, 255, 0.035),
       0 0 0 1px rgba(196, 181, 253, 0.20),
-      0 0 26px rgba(168, 85, 247, 0.26),
+      0 0 26px rgba(34, 211, 238, 0.18),
       0 0 54px rgba(139, 92, 246, 0.16);
     transform: translateY(-1px);
   }
@@ -957,284 +1431,13 @@
   .driver-chip--neutral {
     color: #cffafe;
     background: rgba(34, 211, 238, 0.10);
-    border-color: rgba(103, 232, 249, 0.22);
+    border-color: rgba(196, 181, 253, 0.22);
   }
 
 
-/* === Guaranteed visible runtime background === */
 html,
 body {
   min-height: 100%;
-}
-
-body.fleet-app {
-  min-height: 100vh;
-  position: relative;
-  overflow-x: hidden;
-  overflow-y: auto;
-  background: #020617 !important;
-}
-
-.fleet-runtime-bg {
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  overflow: hidden;
-}
-
-.fleet-runtime-app {
-  position: relative;
-  z-index: 1;
-  min-height: 100vh;
-}
-
-.fleet-runtime-bg__base,
-.fleet-runtime-bg__grid,
-.fleet-runtime-bg__waves,
-.fleet-runtime-bg__glow,
-.fleet-runtime-bg__particles {
-  position: absolute;
-  inset: 0;
-}
-
-.fleet-runtime-bg__base {
-  background:
-    radial-gradient(circle at 18% 14%, rgba(34, 211, 238, 0.18), transparent 0 16%),
-    radial-gradient(circle at 82% 12%, rgba(139, 92, 246, 0.20), transparent 0 18%),
-    radial-gradient(circle at 54% 80%, rgba(59, 130, 246, 0.12), transparent 0 22%),
-    linear-gradient(180deg, rgba(1, 8, 24, 0.98), rgba(2, 6, 23, 1));
-}
-
-.fleet-runtime-bg__grid {
-  opacity: 0.18;
-  background-image:
-    linear-gradient(rgba(34, 211, 238, 0.06) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(34, 211, 238, 0.06) 1px, transparent 1px);
-  background-size: 140px 140px, 140px 140px;
-  mask-image: linear-gradient(to bottom, transparent, black 16%, black 84%, transparent);
-  -webkit-mask-image: linear-gradient(to bottom, transparent, black 16%, black 84%, transparent);
-  animation: fleetRuntimeGridDrift 30s linear infinite;
-}
-
-
-.fleet-runtime-bg__waves {
-  inset: 0;
-  overflow: hidden;
-  opacity: 0.88;
-  mix-blend-mode: screen;
-  filter: saturate(1.18);
-}
-
-.fleet-runtime-bg__waves::before,
-.fleet-runtime-bg__waves::after {
-  content: "";
-  position: absolute;
-  inset: auto;
-  left: -14%;
-  right: -14%;
-  height: 280px;
-  border-radius: 9999px;
-  pointer-events: none;
-  background-repeat: no-repeat;
-  background-size: 100% 100%;
-  opacity: 1;
-  filter: blur(0.4px) drop-shadow(0 0 10px rgba(34, 211, 238, 0.22)) drop-shadow(0 0 24px rgba(139, 92, 246, 0.16));
-}
-
-.fleet-runtime-bg__waves--one::before {
-  bottom: 18%;
-  background:
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1600 280' preserveAspectRatio='none'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='0%25'%3E%3Cstop offset='0%25' stop-color='%2300e5ff' stop-opacity='0'/%3E%3Cstop offset='12%25' stop-color='%2300e5ff' stop-opacity='.75'/%3E%3Cstop offset='48%25' stop-color='%2340f9ff' stop-opacity='.95'/%3E%3Cstop offset='78%25' stop-color='%235ac8ff' stop-opacity='.82'/%3E%3Cstop offset='100%25' stop-color='%2300e5ff' stop-opacity='0'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M0 178 C130 108 245 86 372 130 C492 172 614 248 744 226 C892 202 957 88 1108 78 C1244 70 1360 174 1600 138' fill='none' stroke='url(%23g)' stroke-width='9' stroke-linecap='round'/%3E%3Cpath d='M0 190 C126 120 242 98 368 142 C490 182 618 258 742 236 C894 212 960 98 1106 88 C1240 80 1360 184 1600 148' fill='none' stroke='url(%23g)' stroke-opacity='.34' stroke-width='18' stroke-linecap='round'/%3E%3C/svg%3E")
-      center/100% 100% no-repeat;
-  animation: fleetWaveDriftOne 18s ease-in-out infinite;
-}
-
-.fleet-runtime-bg__waves--one::after {
-  bottom: 29%;
-  background:
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1600 280' preserveAspectRatio='none'%3E%3Cdefs%3E%3ClinearGradient id='g2' x1='0%25' y1='0%25' x2='100%25' y2='0%25'%3E%3Cstop offset='0%25' stop-color='%238b5cf6' stop-opacity='0'/%3E%3Cstop offset='16%25' stop-color='%238b5cf6' stop-opacity='.42'/%3E%3Cstop offset='48%25' stop-color='%23d946ef' stop-opacity='.92'/%3E%3Cstop offset='82%25' stop-color='%238b5cf6' stop-opacity='.55'/%3E%3Cstop offset='100%25' stop-color='%238b5cf6' stop-opacity='0'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M0 150 C156 236 286 240 416 178 C560 108 660 52 810 102 C944 146 1058 258 1188 246 C1328 234 1434 136 1600 70' fill='none' stroke='url(%23g2)' stroke-width='8' stroke-linecap='round'/%3E%3Cpath d='M0 150 C156 236 286 240 416 178 C560 108 660 52 810 102 C944 146 1058 258 1188 246 C1328 234 1434 136 1600 70' fill='none' stroke='url(%23g2)' stroke-opacity='.24' stroke-width='18' stroke-linecap='round'/%3E%3C/svg%3E")
-      center/100% 100% no-repeat;
-  animation: fleetWaveDriftTwo 24s ease-in-out infinite;
-}
-
-.fleet-runtime-bg__waves--two::before {
-  bottom: 10%;
-  height: 320px;
-  opacity: 0.72;
-  background:
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1600 320' preserveAspectRatio='none'%3E%3Cdefs%3E%3ClinearGradient id='g3' x1='0%25' y1='0%25' x2='100%25' y2='0%25'%3E%3Cstop offset='0%25' stop-color='%230ea5e9' stop-opacity='0'/%3E%3Cstop offset='14%25' stop-color='%230ea5e9' stop-opacity='.42'/%3E%3Cstop offset='50%25' stop-color='%2322d3ee' stop-opacity='.82'/%3E%3Cstop offset='86%25' stop-color='%230ea5e9' stop-opacity='.4'/%3E%3Cstop offset='100%25' stop-color='%230ea5e9' stop-opacity='0'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M0 210 C178 148 292 92 450 118 C612 146 736 286 896 278 C1048 270 1152 148 1316 108 C1434 80 1508 96 1600 142' fill='none' stroke='url(%23g3)' stroke-width='7' stroke-linecap='round'/%3E%3Cpath d='M0 210 C178 148 292 92 450 118 C612 146 736 286 896 278 C1048 270 1152 148 1316 108 C1434 80 1508 96 1600 142' fill='none' stroke='url(%23g3)' stroke-opacity='.2' stroke-width='16' stroke-linecap='round'/%3E%3C/svg%3E")
-      center/100% 100% no-repeat;
-  animation: fleetWaveDriftThree 21s ease-in-out infinite;
-}
-
-.fleet-runtime-bg__waves--two::after {
-  bottom: 34%;
-  height: 220px;
-  opacity: 0.52;
-  background:
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1600 220' preserveAspectRatio='none'%3E%3Cdefs%3E%3ClinearGradient id='g4' x1='0%25' y1='0%25' x2='100%25' y2='0%25'%3E%3Cstop offset='0%25' stop-color='%23a855f7' stop-opacity='0'/%3E%3Cstop offset='18%25' stop-color='%23a855f7' stop-opacity='.26'/%3E%3Cstop offset='52%25' stop-color='%23e879f9' stop-opacity='.62'/%3E%3Cstop offset='84%25' stop-color='%23a855f7' stop-opacity='.3'/%3E%3Cstop offset='100%25' stop-color='%23a855f7' stop-opacity='0'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M0 120 C150 70 254 64 380 104 C518 148 618 214 776 196 C930 178 1018 82 1158 64 C1294 48 1420 100 1600 184' fill='none' stroke='url(%23g4)' stroke-width='5.5' stroke-linecap='round'/%3E%3C/svg%3E")
-      center/100% 100% no-repeat;
-  animation: fleetWaveDriftFour 26s ease-in-out infinite;
-}
-
-.fleet-runtime-bg__waves--three::before {
-  bottom: 21%;
-  height: 240px;
-  opacity: 0.24;
-  background:
-    linear-gradient(90deg, transparent 0%, rgba(34, 211, 238, 0.22) 48%, rgba(139, 92, 246, 0.18) 70%, transparent 100%);
-  filter: blur(18px);
-  animation: fleetWaveSheen 16s ease-in-out infinite;
-}
-
-.fleet-runtime-bg__waves--three::after {
-  bottom: 0;
-  left: -10%;
-  right: -10%;
-  height: 420px;
-  opacity: 0.14;
-  background:
-    radial-gradient(circle at 12% 68%, rgba(34, 211, 238, 0.9) 0 8px, transparent 16px),
-    radial-gradient(circle at 86% 32%, rgba(34, 211, 238, 0.72) 0 7px, transparent 14px),
-    radial-gradient(circle at 72% 56%, rgba(139, 92, 246, 0.92) 0 10px, transparent 18px),
-    radial-gradient(circle at 52% 44%, rgba(196, 181, 253, 0.82) 0 6px, transparent 15px),
-    radial-gradient(circle at 20% 84%, rgba(59, 130, 246, 0.9) 0 12px, transparent 20px);
-  filter: blur(1px) drop-shadow(0 0 12px rgba(34, 211, 238, 0.22));
-  animation: fleetWaveNodes 22s ease-in-out infinite;
-}
-
-.fleet-runtime-bg__glow {
-  border-radius: 9999px;
-  filter: blur(70px);
-  mix-blend-mode: screen;
-}
-
-.fleet-runtime-bg__glow--cyan {
-  inset: auto;
-  top: 8%;
-  left: 4%;
-  width: 32rem;
-  height: 32rem;
-  opacity: 0.34;
-  background: radial-gradient(circle, rgba(34, 211, 238, 0.42), transparent 68%);
-  animation: fleetRuntimeFloatOne 18s ease-in-out infinite;
-}
-
-.fleet-runtime-bg__glow--violet {
-  inset: auto;
-  top: 10%;
-  right: 4%;
-  width: 26rem;
-  height: 26rem;
-  opacity: 0.30;
-  background: radial-gradient(circle, rgba(139, 92, 246, 0.40), transparent 70%);
-  animation: fleetRuntimeFloatTwo 20s ease-in-out infinite;
-}
-
-.fleet-runtime-bg__glow--blue {
-  inset: auto;
-  bottom: 2%;
-  left: 28%;
-  width: 34rem;
-  height: 34rem;
-  opacity: 0.20;
-  background: radial-gradient(circle, rgba(59, 130, 246, 0.34), transparent 72%);
-  animation: fleetRuntimeFloatThree 24s ease-in-out infinite;
-}
-
-.fleet-runtime-bg__particles {
-  opacity: 0.14;
-  background-image:
-    radial-gradient(circle at 20% 20%, rgba(255,255,255,0.75) 0.7px, transparent 1px),
-    radial-gradient(circle at 80% 35%, rgba(103,232,249,0.55) 0.8px, transparent 1.1px),
-    radial-gradient(circle at 60% 75%, rgba(196,181,253,0.48) 0.8px, transparent 1.1px);
-  background-size: 220px 220px, 280px 280px, 340px 340px;
-  animation: fleetRuntimeParticles 26s linear infinite;
-}
-
-@keyframes fleetRuntimeGridDrift {
-  0% {
-    background-position: 0 0, 0 0;
-  }
-  100% {
-    background-position: 0 140px, 140px 0;
-  }
-}
-
-@keyframes fleetRuntimeFloatOne {
-  0%, 100% {
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-  50% {
-    transform: translate3d(4%, 6%, 0) scale(1.08);
-  }
-}
-
-@keyframes fleetRuntimeFloatTwo {
-  0%, 100% {
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-  50% {
-    transform: translate3d(-5%, 4%, 0) scale(1.1);
-  }
-}
-
-@keyframes fleetRuntimeFloatThree {
-  0%, 100% {
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-  50% {
-    transform: translate3d(3%, -4%, 0) scale(1.06);
-  }
-}
-
-@keyframes fleetRuntimeParticles {
-  0% {
-    background-position: 0 0, 0 0, 0 0;
-  }
-  100% {
-    background-position: 220px 140px, -180px 200px, 260px -220px;
-  }
-}
-
-
-@keyframes fleetWaveDriftOne {
-  0%, 100% { transform: translate3d(-1.5%, 0, 0) scaleX(1); opacity: 0.9; }
-  50% { transform: translate3d(1.8%, -10px, 0) scaleX(1.02); opacity: 1; }
-}
-
-@keyframes fleetWaveDriftTwo {
-  0%, 100% { transform: translate3d(2%, 0, 0) scaleX(1.01); opacity: 0.72; }
-  50% { transform: translate3d(-2.5%, 14px, 0) scaleX(0.985); opacity: 0.95; }
-}
-
-@keyframes fleetWaveDriftThree {
-  0%, 100% { transform: translate3d(-1%, 0, 0) scaleX(1.01); }
-  50% { transform: translate3d(2.2%, -12px, 0) scaleX(0.99); }
-}
-
-@keyframes fleetWaveDriftFour {
-  0%, 100% { transform: translate3d(1%, 0, 0) scaleX(1); opacity: 0.38; }
-  50% { transform: translate3d(-2%, 8px, 0) scaleX(1.02); opacity: 0.62; }
-}
-
-@keyframes fleetWaveSheen {
-  0%, 100% { transform: translate3d(-4%, 0, 0) scaleX(1); opacity: 0.14; }
-  50% { transform: translate3d(5%, -8px, 0) scaleX(1.03); opacity: 0.26; }
-}
-
-@keyframes fleetWaveNodes {
-  0%, 100% { transform: translate3d(0, 0, 0); opacity: 0.12; }
-  50% { transform: translate3d(0, -10px, 0); opacity: 0.2; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .fleet-runtime-bg__grid,
-  .fleet-runtime-bg__waves,
-  .fleet-runtime-bg__glow,
-  .fleet-runtime-bg__particles {
-    animation: none !important;
-  }
 }
 
 .fleet-timeline-scroll {

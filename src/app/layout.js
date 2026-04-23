@@ -1,8 +1,9 @@
-import { Space_Grotesk, Geist_Mono } from "next/font/google";
+import { Inter, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import ThemeProvider from "@/components/theme/ThemeProvider";
 
-const spaceGrotesk = Space_Grotesk({
-  variable: "--font-space-grotesk",
+const inter = Inter({
+  variable: "--font-inter",
   subsets: ["latin"],
 });
 
@@ -22,23 +23,12 @@ export const metadata = {
 
 export default function RootLayout({ children }) {
   return (
-    <html lang="en">
-      <body className={`fleet-app ${spaceGrotesk.variable} ${geistMono.variable} antialiased`}>
-        <div className="fleet-runtime-bg" aria-hidden="true">
-          <div className="fleet-runtime-bg__base" />
-          <div className="fleet-runtime-bg__grid" />
-          <div className="fleet-runtime-bg__waves fleet-runtime-bg__waves--one" />
-          <div className="fleet-runtime-bg__waves fleet-runtime-bg__waves--two" />
-          <div className="fleet-runtime-bg__waves fleet-runtime-bg__waves--three" />
-          <div className="fleet-runtime-bg__glow fleet-runtime-bg__glow--cyan" />
-          <div className="fleet-runtime-bg__glow fleet-runtime-bg__glow--violet" />
-          <div className="fleet-runtime-bg__glow fleet-runtime-bg__glow--blue" />
-          <div className="fleet-runtime-bg__particles" />
-        </div>
-
-        <div className="fleet-runtime-app">
+    <html lang="en" className="dark" data-accent="blue" suppressHydrationWarning>
+      <body className={`${inter.variable} ${geistMono.variable} antialiased`}>
+        <div className="fleet-page-bg mesh-gradient" aria-hidden="true" />
+        <ThemeProvider>
           {children}
-        </div>
+        </ThemeProvider>
       </body>
     </html>
   );

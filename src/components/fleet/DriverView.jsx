@@ -25,6 +25,9 @@ export default function DriverView({
   registrationDoc = null,
   onOpenDocument,
   onDownloadDocument,
+  outboxCount = 0,
+  outboxProcessing = false,
+  onRetryOutbox,
   journeyDraft,
   onJourneyDraftChange,
   activeJourney = null,
@@ -39,6 +42,8 @@ export default function DriverView({
   onOpenExpense,
   aiFile,
   onAiFileChange,
+  aiProvider = "auto",
+  onAiProviderChange,
   onRunAi,
   aiSaving = false,
   onSubmitExpense,
@@ -140,6 +145,28 @@ export default function DriverView({
         {loadError ? (
           <div className="mb-4 rounded-2xl border border-red-500/35 bg-red-500/12 px-4 py-3 text-sm text-red-100">
             {loadError}
+          </div>
+        ) : null}
+
+        {Number(outboxCount || 0) > 0 ? (
+          <div className="mb-4 rounded-2xl border border-amber-400/25 bg-amber-400/10 px-4 py-3 text-sm text-amber-50">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="font-semibold">Függőben lévő mentések: {Number(outboxCount || 0)}</div>
+                <div className="mt-1 text-xs text-amber-100/90">
+                  Gyenge net esetén a mentések sorba állnak és később automatikusan beküldjük.
+                </div>
+              </div>
+              <Button
+                type="button"
+                variant="secondary"
+                className="driver-cta driver-cta--secondary h-11 rounded-2xl px-4"
+                disabled={outboxProcessing}
+                onClick={() => onRetryOutbox?.()}
+              >
+                {outboxProcessing ? "Küldés..." : "Újrapróbálás"}
+              </Button>
+            </div>
           </div>
         ) : null}
 
@@ -615,6 +642,22 @@ export default function DriverView({
                     <p className="text-sm text-slate-300">Bizonylat feldolgozása draftként</p>
                   </CardHeader>
                   <CardContent className="space-y-3 border-t border-white/10 pt-6">
+                    <div className="space-y-2">
+                      <Label className="text-slate-200">AI szolgáltató</Label>
+                      <select
+                        className="driver-input h-11 w-full rounded-2xl border border-white/10 bg-slate-950/50 px-3 text-sm text-white"
+                        value={aiProvider === "openai" || aiProvider === "gemini" || aiProvider === "auto" ? aiProvider : "auto"}
+                        onChange={(e) => onAiProviderChange?.(e.target.value)}
+                        disabled={aiSaving}
+                      >
+                        <option value="auto">Automatikus (ha mindkét kulcs be van állítva: Gemini)</option>
+                        <option value="gemini">Google Gemini</option>
+                        <option value="openai">OpenAI</option>
+                      </select>
+                      <p className="text-xs text-slate-400">
+                        A választást a szerver Edge Function kulcsai határozzák meg; ha csak az egyik elérhető, azt használjuk.
+                      </p>
+                    </div>
                     <Input type="file" accept="image/*,application/pdf" className="driver-input rounded-2xl" disabled={aiSaving} onChange={(e) => onAiFileChange?.(e.target.files?.[0] || null)} />
                     {aiFile ? <div className="text-xs text-slate-400">{aiFile.name}</div> : null}
                     <Button type="button" className="driver-cta h-12 w-full rounded-2xl sm:w-auto" disabled={aiSaving} onClick={() => onRunAi?.()}>

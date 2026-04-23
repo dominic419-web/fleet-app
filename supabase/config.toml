@@ -1,0 +1,5 @@
+# Edge Function: gateway JWT check conflicts with newer Supabase ES256 access tokens.
+# Auth is still enforced inside the function via createClient(..., { headers: { Authorization } }).auth.getUser().
+# See: https://supabase.com/docs/guides/functions/function-configuration
+[functions.process-expense-receipt]
+verify_jwt = false
